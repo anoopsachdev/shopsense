@@ -1,0 +1,61 @@
+"""Ranking metrics over ESCI relevance labels.
+
+Labels map to graded gains: Exact 3, Substitute 2, Complement 1, Irrelevant 0. The
+esci-data README gives no Task 1 gains, so these are the CLAUDE.md fallback. Products
+without a label for the query count as irrelevant (gain 0).
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Mapping, Sequence
+
+ESCI_GAINS: dict[str, float] = {"E": 3.0, "S": 2.0, "C": 1.0, "I": 0.0}
+
+
+def gain(label: str | None, gains: Mapping[str, float] = ESCI_GAINS) -> float:
+    """Gain for an ESCI label; None (unlabelled) is 0."""
+    return 0.0 if label is None else gains[label]
+
+
+def dcg(gains: Sequence[float]) -> float:
+    """Discounted cumulative gain of gains in rank order: sum of g_i / log2(i + 1)."""
+    return sum(g / math.log2(rank + 1) for rank, g in enumerate(gains, start=1))
+
+
+def ndcg_at_k(
+    ranked_ids: Sequence[str],
+    labels: Mapping[str, str],
+    k: int,
+    gains: Mapping[str, float] = ESCI_GAINS,
+) -> float:
+    """NDCG@k of a ranking against one query's labels.
+
+    The ideal ranking is the query's labelled products sorted by gain. Returns 0.0 when
+    the query has no product with positive gain.
+    """
+    ranked_gains = [gain(labels.get(pid), gains) for pid in ranked_ids[:k]]
+    ideal_gains = sorted((gain(label, gains) for label in labels.values()), reverse=True)[:k]
+    ideal = dcg(ideal_gains)
+    return dcg(ranked_gains) / ideal if ideal > 0 else 0.0
+
+
+def recall_at_k(
+    ranked_ids: Sequence[str],
+    labels: Mapping[str, str],
+    k: int,
+    gains: Mapping[str, float] = ESCI_GAINS,
+) -> float:
+    """Share of the query's relevant products (gain > 0) found in the top k.
+
+    Returns 0.0 when the query has no relevant product.
+    """
+    relevant = {pid for pid, label in labels.items() if gain(label, gains) > 0}
+    if not relevant:
+        return 0.0
+    return len(relevant.intersection(ranked_ids[:k])) / len(relevant)
+
+
+def mean(values: Sequence[float]) -> float:
+    """Arithmetic mean; 0.0 for an empty sequence."""
+    return sum(values) / len(values) if values else 0.0
