@@ -1,4 +1,4 @@
-# Notes: steps 1–7 (data, metrics, BM25 baseline)
+# Notes: data, metrics, BM25, dense, hybrid and cross-encoder
 
 ## What was built
 
@@ -10,27 +10,42 @@
 | 4 Metrics | `src/shopsense/metrics.py`, `tests/test_metrics.py` | `889b84f` |
 | 5 Retrieval | `src/shopsense/retrieval/base.py`, `bm25.py`, `tests/test_bm25.py` | `b47abc6` |
 | 6 Evaluation | `scripts/evaluate.py`, `tests/test_evaluate.py` | `5b02c71` |
+| 8 Dense | `src/shopsense/retrieval/dense.py`, `scripts/build_index.py`, tests | `1e8825b` |
+| 9 Hybrid (RRF) | `src/shopsense/retrieval/hybrid.py`, `tests/test_hybrid.py` | `1ef723c` |
+| 10 Cross-encoder | `src/shopsense/rerank/base.py`, `cross_encoder.py`, tests | `c91ba1a` |
+| 11 Pipeline config | `src/shopsense/pipeline.py`, `tests/test_pipeline.py` | `e53d3ae` |
+| 12 Evaluation table | `scripts/evaluate.py` (all pipelines, p50/p95), tests | `8bbc47f` |
 
-`pytest -q`: 38 passed.
+`pytest -q`: 73 passed.
 
 Data in `data/` (gitignored):
 - `examples.parquet`: 601,354 rows (US, `small_version == 1`, both splits). This matches the README's US Task 1 count.
 - `eval_query_ids.json`: seed 42, 500 eval IDs and 2,000 distractor IDs, with no overlap.
 - `products.parquet`: all 482,105 US products in the Task 1 rows, 233 MB.
+- `dense_bge-small-en-v1.5.npz`: 48,862 × 384 float32 product vectors plus their product IDs, 77 MB.
 - `raw/`: the two original ESCI parquet files (1.2 GB), sha256-checked. You can delete them; the script downloads them again only if they're missing.
 
 The **search catalog is fixed at 48,862 products**: the products labelled for the 2,500 sampled queries. `data.build_catalog` builds it from `eval_query_ids.json`, and every pipeline searches it, so results stay comparable with the BM25 row. The other ~433k products are stored but never indexed or embedded.
 
-## BM25 results (500 eval queries, seed 42)
+## Results (500 eval queries, seed 42, gains E3/S2/C1/I0)
 
-```
-catalog: 48,862 products from 2,500 queries
-BM25 index built in 4.4s
-BM25 full catalog:    NDCG@10 = 0.5270   Recall@50 = 0.6032   latency = 64.8 ms/query
-BM25 re-ranking only: NDCG@10 = 0.8293
-```
+`python scripts/evaluate.py --pipelines all`, on a laptop CPU:
 
-All 500 eval queries have at least one E/S/C product. The re-ranking-only number is not comparable to the README's 0.83 baseline, because that used different gains (see below) and a different query set.
+| Pipeline | Full NDCG@10 | Full Recall@50 | Full p50 ms | Full p95 ms | Rerank NDCG@10 | Rerank p50 ms | Rerank p95 ms |
+|---|---|---|---|---|---|---|---|
+| bm25 | 0.5270 | 0.6032 | 49.6 | 89.6 | 0.8293 | 1.2 | 1.3 |
+| dense | 0.5627 | 0.6628 | 17.7 | 19.8 | 0.8517 | 2.9 | 3.9 |
+| hybrid | 0.5828 | 0.6871 | 65.3 | 104.6 | 0.8451 | 4.4 | 5.2 |
+| hybrid+cross_encoder | 0.6298 | 0.6871 | 1193.9 | 1428.0 | 0.8503 | 400.0 | 1161.9 |
+
+- **Full catalog** is where the gains are. Dense beats BM25 by +0.036 NDCG@10. Hybrid adds another +0.020 and has the best Recall@50 (0.687). The cross-encoder takes NDCG@10 to 0.630, +0.103 over BM25, at about 1.2 s per query.
+- **Hybrid and hybrid+cross_encoder have the same Recall@50 by construction.** The cross-encoder only re-orders the top 50 hybrid hits, so the set it returns is unchanged.
+- **Re-ranking only** barely moves: 0.829 to 0.852. Most candidates are Exact matches. The cross-encoder (0.850) doesn't beat plain dense (0.852) here.
+- **BM25 reproduces exactly** after the full products re-download and the venv rebuild. All 500 eval queries have at least one E/S/C product.
+- **Latency** is search time per query, run sequentially, with indexing excluded. Dense p50 (18 ms) includes embedding the query. The cross-encoder dominates its pipeline's latency: 50 pairs of up to 512 tokens on CPU.
+- **Embedding the catalog took 7,804 s (about 2 h 10 min)** on this laptop's CPU, at roughly 6 products/s and 2.7 GB peak RAM (`scripts/build_index.py`). It only needs to run again if the catalog, model or text fields change.
+
+None of these numbers are comparable to the esci-data README's 0.83 baseline, because that used different gains and a different query set.
 
 ## Assumptions and decisions
 
@@ -44,8 +59,16 @@ All 500 eval queries have at least one E/S/C product. The re-ranking-only number
 8. **BM25:** `BM25Okapi` with default parameters (k1=1.5, b=0.75). Tokenizer: lowercase, split on non-alphanumerics, no stemming or stopwords. Text is title + brand + color + bullet points; the description is left out. Ties keep catalog order. Zero-score products are still returned, so every candidate gets ranked in the re-ranking setting.
 9. **Re-ranking setting** reuses the full-catalog BM25 index, so IDF comes from all 48,862 products, and it scores only the query's labelled candidates.
 10. **Python 3.12 instead of 3.11.** 3.11 isn't installed. `pyproject.toml` says `>=3.11`. `.venv` is now an isolated venv built with `pip install -e ".[dev]"`, with no Anaconda packages visible. The first version reused Anaconda's site-packages, and its old torch, torchvision and torchaudio broke sentence-transformers.
-11. **Evaluation helpers live in `scripts/evaluate.py`** to keep to the CLAUDE.md layout. Tests load the scripts through `importlib`. `evaluate.py` has a `--data-dir` flag but no `--pipelines` flag yet, because there is only one pipeline.
-12. I created no `rerank/`, `llm/`, `pipeline.py`, `api.py` or `web/`: those are outside steps 1–7.
+11. **Evaluation helpers live in `scripts/evaluate.py`** to keep to the CLAUDE.md layout. Tests load the scripts through `importlib`. `--pipelines all` or a comma list chooses pipelines by name from `pipeline.PIPELINES`.
+12. **Dense:** `BAAI/bge-small-en-v1.5` through fastembed (ONNX, CPU), using `passage_embed` for products and `query_embed` for queries. I added no BGE query instruction prefix. It uses the same text fields as BM25, and the model truncates at 512 tokens. Vectors are L2-normalized, and search is brute-force cosine with numpy. 48,862 × 384 is small, so I didn't add FAISS.
+13. **Saved vectors are tied to the catalog.** `DenseRetriever.index` loads `data/dense_bge-small-en-v1.5.npz` and raises if its product IDs differ from the catalog's, which means rerun `build_index.py`. If the file is missing, it embeds and saves. The vectors path is fixed at `data/...`; `evaluate.py --data-dir` doesn't move it.
+14. **Hybrid:** RRF with k=60, scoring each product as the sum of `1/(60 + rank)`. Each retriever contributes its top 100, or k if larger. Ties keep first-appearance order. In the re-ranking setting, both retrievers score only the candidates.
+15. **Cross-encoder:** `cross-encoder/ms-marco-MiniLM-L-6-v2` through sentence-transformers on CPU. I chose L-6, the cheapest MS MARCO MiniLM. The ESCI baseline used L-12, which would be about 2× slower. It reads the same text fields as the retrievers and re-orders the top 50 hybrid hits; any deeper hits keep hybrid order. In the re-ranking setting it re-orders all of a query's ~20 candidates.
+16. **Pipeline configs** look like `{"retriever": ..., "reranker": ..., "rerank_depth": ...}`, with unknown keys or names raising `ValueError`. Hybrid is always BM25 + dense. Swapping a stage is a config change.
+17. **Untested on purpose:** `FastEmbedEncoder` and `load_cross_encoder` aren't unit-tested, because they download models. Every class that uses them takes an injectable encoder or scorer, and tests pass fakes. The real models were exercised by `build_index.py` and the evaluation run.
+18. **Model caches:** fastembed keeps bge-small under the system temp dir (`$TMPDIR/fastembed_cache`), which macOS may clear; it re-downloads in under a minute. The cross-encoder is in `~/.cache/huggingface`.
+19. **Gains are still E3/S2/C1/I0 (CLAUDE.md fallback).** I checked again: the esci-data README states no gains. The E1/S0.1/C0.01 values appear only in the repo's ranking scripts. The README now says which gains are used and that every pipeline uses them.
+20. Nothing touches the LLM, GCP or the API.
 
 ## What failed or needs your attention
 
@@ -57,4 +80,5 @@ All 500 eval queries have at least one E/S/C product. The re-ranking-only number
   PYTHONPATH=src .venv/bin/python scripts/evaluate.py
   ```
 - **The commit `b2dcec8` (download script) imports `shopsense.data`, which only lands in the next commit.** The data sampling had to happen before the product download. Every commit from `610a0bc` on runs.
+- **Dependencies:** sentence-transformers 6 needs torch ≥ 2.6, but Anaconda has 2.3.1, and its torchvision and torchaudio clashed with a newer torch. So `.venv` was rebuilt as an isolated venv: torch 2.14.1, numpy 2.5.4, pyarrow 26, fastembed 0.9, sentence-transformers 6.2. That uses about 1.4 GB.
 - **The network is slow and flaky here.** The first full re-download, which streamed range requests, timed out after 100 minutes at 1.22M of 1.81M rows. The resumable version finished in about 2 hours with 4 read timeouts, all recovered.
