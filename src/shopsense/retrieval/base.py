@@ -8,6 +8,19 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+# The product fields every stage reads, in this order (title first, so truncation keeps it).
+TEXT_FIELDS = ["product_title", "product_brand", "product_color", "product_bullet_point"]
+
+
+def product_text(row: pd.Series) -> str:
+    """Join the product's text fields, skipping missing ones."""
+    return " ".join(str(row[field]) for field in TEXT_FIELDS if pd.notna(row.get(field)))
+
+
+def catalog_texts(catalog: pd.DataFrame) -> list[str]:
+    """`product_text` for every catalog row, in catalog order."""
+    return [product_text(row) for _, row in catalog.iterrows()]
+
 
 @dataclass(frozen=True)
 class Hit:

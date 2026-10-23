@@ -9,19 +9,12 @@ import numpy as np
 import pandas as pd
 from rank_bm25 import BM25Okapi
 
-from shopsense.retrieval.base import Hit, Retriever
-
-TEXT_FIELDS = ["product_title", "product_brand", "product_color", "product_bullet_point"]
+from shopsense.retrieval.base import Hit, Retriever, catalog_texts
 
 
 def tokenize(text: str) -> list[str]:
     """Lowercase and split on anything that isn't a letter or digit."""
     return re.findall(r"[a-z0-9]+", text.lower())
-
-
-def product_text(row: pd.Series) -> str:
-    """Join the product's text fields, skipping missing ones."""
-    return " ".join(str(row[field]) for field in TEXT_FIELDS if pd.notna(row.get(field)))
 
 
 class BM25Retriever(Retriever):
@@ -36,7 +29,7 @@ class BM25Retriever(Retriever):
         """Tokenize each product's text and build the BM25 index."""
         self._product_ids = catalog["product_id"].tolist()
         self._position = {pid: i for i, pid in enumerate(self._product_ids)}
-        corpus = [tokenize(product_text(row)) for _, row in catalog.iterrows()]
+        corpus = [tokenize(text) for text in catalog_texts(catalog)]
         self._bm25 = BM25Okapi(corpus)
 
     def search(

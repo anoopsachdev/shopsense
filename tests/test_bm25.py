@@ -1,8 +1,8 @@
 import pandas as pd
 import pytest
 
-from shopsense.retrieval.base import Hit
-from shopsense.retrieval.bm25 import BM25Retriever, product_text, tokenize
+from shopsense.retrieval.base import Hit, catalog_texts, product_text
+from shopsense.retrieval.bm25 import BM25Retriever, tokenize
 
 CATALOG = pd.DataFrame(
     {
@@ -29,6 +29,12 @@ def test_tokenize_lowercases_and_splits_on_punctuation():
 
 def test_product_text_joins_fields_and_skips_missing_and_description():
     assert product_text(CATALOG.iloc[2]) == "Coffee mug white Holds 12oz of coffee"
+
+
+def test_catalog_texts_keeps_catalog_order():
+    texts = catalog_texts(CATALOG)
+    assert len(texts) == 4
+    assert texts[0] == "Red running shoes Acme red Lightweight mesh"
 
 
 def test_search_ranks_matching_product_first(retriever):
