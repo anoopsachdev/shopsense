@@ -1,8 +1,15 @@
 """Ranking metrics over ESCI relevance labels.
 
-Labels map to graded gains: Exact 3, Substitute 2, Complement 1, Irrelevant 0. The
-esci-data README gives no Task 1 gains, so these are the CLAUDE.md fallback. Products
-without a label for the query count as irrelevant (gain 0).
+Two gain sets map ESCI labels to NDCG gains:
+
+- ESCI_OFFICIAL_GAINS (the headline): Exact 1.0, Substitute 0.1, Complement 0.01,
+  Irrelevant 0. These are the gains the esci-data repo's own Task 1 ranking scripts use
+  (ranking/prepare_trec_eval_files.py, ranking/train.py), so scores are on the same scale
+  as published ESCI results. Substitutes get little credit.
+- ESCI_GRADED_GAINS: Exact 3, Substitute 2, Complement 1, Irrelevant 0, the CLAUDE.md
+  fallback. Substitutes get two-thirds credit, which pushes scores up.
+
+Products without a label for the query count as irrelevant (gain 0).
 """
 
 from __future__ import annotations
@@ -10,10 +17,17 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 
-ESCI_GAINS: dict[str, float] = {"E": 3.0, "S": 2.0, "C": 1.0, "I": 0.0}
+ESCI_OFFICIAL_GAINS: dict[str, float] = {"E": 1.0, "S": 0.1, "C": 0.01, "I": 0.0}
+ESCI_GRADED_GAINS: dict[str, float] = {"E": 3.0, "S": 2.0, "C": 1.0, "I": 0.0}
+
+# Gain sets by name, as accepted by scripts/evaluate.py --gains. The first is the headline.
+GAIN_SETS: dict[str, dict[str, float]] = {
+    "official": ESCI_OFFICIAL_GAINS,
+    "graded": ESCI_GRADED_GAINS,
+}
 
 
-def gain(label: str | None, gains: Mapping[str, float] = ESCI_GAINS) -> float:
+def gain(label: str | None, gains: Mapping[str, float] = ESCI_OFFICIAL_GAINS) -> float:
     """Gain for an ESCI label; None (unlabelled) is 0."""
     return 0.0 if label is None else gains[label]
 
@@ -27,7 +41,7 @@ def ndcg_at_k(
     ranked_ids: Sequence[str],
     labels: Mapping[str, str],
     k: int,
-    gains: Mapping[str, float] = ESCI_GAINS,
+    gains: Mapping[str, float] = ESCI_OFFICIAL_GAINS,
 ) -> float:
     """NDCG@k of a ranking against one query's labels.
 
@@ -44,7 +58,7 @@ def recall_at_k(
     ranked_ids: Sequence[str],
     labels: Mapping[str, str],
     k: int,
-    gains: Mapping[str, float] = ESCI_GAINS,
+    gains: Mapping[str, float] = ESCI_OFFICIAL_GAINS,
 ) -> float:
     """Share of the query's relevant products (gain > 0) found in the top k.
 

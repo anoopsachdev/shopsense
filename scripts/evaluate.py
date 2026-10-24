@@ -6,10 +6,14 @@ Re-ranking only: rank each query's own labelled candidates (~20 products) and re
 NDCG@10, which is the original ESCI Task 1 setup.
 Both settings report p50/p95 latency per query (search only; indexing is excluded).
 
+NDCG is reported with the official ESCI gains (E 1.0, S 0.1, C 0.01, I 0; the headline)
+and the graded gains (E 3, S 2, C 1, I 0). Each pipeline searches once; its rankings are
+scored under each gain set.
+
 Run scripts/download_data.py first, and scripts/build_index.py for dense pipelines.
 
     python scripts/evaluate.py --pipelines all
-    python scripts/evaluate.py --pipelines bm25,hybrid
+    python scripts/evaluate.py --pipelines bm25,hybrid --gains official
 """
 
 from __future__ import annotations
@@ -17,12 +21,13 @@ from __future__ import annotations
 import argparse
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 from shopsense import data
-from shopsense.metrics import gain, mean, ndcg_at_k, recall_at_k
+from shopsense.metrics import GAIN_SETS, gain, mean, ndcg_at_k, recall_at_k
 from shopsense.pipeline import PIPELINES, get_pipeline
 from shopsense.retrieval.base import Retriever
 
@@ -38,44 +43,70 @@ def latency_percentiles(seconds: Sequence[float]) -> tuple[float, float]:
     return float(p50), float(p95)
 
 
-def evaluate_full_catalog(
-    retriever: Retriever,
-    queries: Mapping[int, str],
-    labels: Mapping[int, Mapping[str, str]],
-) -> dict[str, float]:
-    """Mean NDCG@10 and Recall@50, plus p50/p95 latency, searching the whole index."""
-    ndcgs, recalls, latencies = [], [], []
+@dataclass(frozen=True)
+class Run:
+    """One pipeline's ranked product IDs per query, and its search latency."""
+
+    rankings: dict[int, list[str]]
+    p50_ms: float
+    p95_ms: float
+
+
+def run_full_catalog(retriever: Retriever, queries: Mapping[int, str]) -> Run:
+    """Search the whole index for each query (top max(NDCG_K, RECALL_K))."""
+    rankings, latencies = {}, []
     for query_id, text in queries.items():
         start = time.perf_counter()
         hits = retriever.search(text, k=max(NDCG_K, RECALL_K))
         latencies.append(time.perf_counter() - start)
-        ranked = [hit.product_id for hit in hits]
-        ndcgs.append(ndcg_at_k(ranked, labels[query_id], NDCG_K))
-        recalls.append(recall_at_k(ranked, labels[query_id], RECALL_K))
-    p50, p95 = latency_percentiles(latencies)
-    return {
-        f"ndcg@{NDCG_K}": mean(ndcgs),
-        f"recall@{RECALL_K}": mean(recalls),
-        "p50_ms": p50,
-        "p95_ms": p95,
-    }
+        rankings[query_id] = [hit.product_id for hit in hits]
+    return Run(rankings, *latency_percentiles(latencies))
 
 
-def evaluate_reranking(
+def run_reranking(
     retriever: Retriever,
     queries: Mapping[int, str],
     labels: Mapping[int, Mapping[str, str]],
-) -> dict[str, float]:
-    """Mean NDCG@10, plus p50/p95 latency, when each query ranks only its own candidates."""
-    ndcgs, latencies = [], []
+) -> Run:
+    """Rank only each query's own labelled candidates."""
+    rankings, latencies = {}, []
     for query_id, text in queries.items():
         candidates = list(labels[query_id])
         start = time.perf_counter()
         hits = retriever.search(text, k=len(candidates), candidate_ids=candidates)
         latencies.append(time.perf_counter() - start)
-        ndcgs.append(ndcg_at_k([hit.product_id for hit in hits], labels[query_id], NDCG_K))
-    p50, p95 = latency_percentiles(latencies)
-    return {f"ndcg@{NDCG_K}": mean(ndcgs), "p50_ms": p50, "p95_ms": p95}
+        rankings[query_id] = [hit.product_id for hit in hits]
+    return Run(rankings, *latency_percentiles(latencies))
+
+
+def score_run(
+    run: Run,
+    labels: Mapping[int, Mapping[str, str]],
+    gains: Mapping[str, float],
+    with_recall: bool,
+) -> dict[str, float]:
+    """Mean NDCG@10 (and Recall@50 if `with_recall`) of a run, plus its latency."""
+    items = run.rankings.items()
+    scores = {f"ndcg@{NDCG_K}": mean([ndcg_at_k(r, labels[q], NDCG_K, gains) for q, r in items])}
+    if with_recall:
+        recalls = [recall_at_k(r, labels[q], RECALL_K, gains) for q, r in items]
+        scores[f"recall@{RECALL_K}"] = mean(recalls)
+    return {**scores, "p50_ms": run.p50_ms, "p95_ms": run.p95_ms}
+
+
+def score_runs(
+    runs: Mapping[str, Mapping[str, Run]],
+    labels: Mapping[int, Mapping[str, str]],
+    gains: Mapping[str, float],
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Score every pipeline's {"full": Run, "rerank": Run} under one gain set."""
+    return {
+        name: {
+            "full": score_run(pair["full"], labels, gains, with_recall=True),
+            "rerank": score_run(pair["rerank"], labels, gains, with_recall=False),
+        }
+        for name, pair in runs.items()
+    }
 
 
 def parse_pipeline_names(arg: str) -> list[str]:
@@ -92,8 +123,8 @@ def parse_pipeline_names(arg: str) -> list[str]:
 def format_table(results: Mapping[str, Mapping[str, Mapping[str, float]]]) -> str:
     """One Markdown table: a row per pipeline, full-catalog then re-ranking-only columns.
 
-    `results` maps pipeline name to {"full": ..., "rerank": ...} as returned by the
-    evaluate_* functions.
+    `results` maps pipeline name to {"full": ..., "rerank": ...} as returned by
+    `score_runs`.
     """
     header = (
         f"| Pipeline | Full NDCG@{NDCG_K} | Full Recall@{RECALL_K} | Full p50 ms | Full p95 ms "
@@ -118,8 +149,14 @@ def main() -> None:
     parser.add_argument(
         "--pipelines", default="all", help=f"'all' or comma-separated: {', '.join(PIPELINES)}"
     )
+    parser.add_argument(
+        "--gains",
+        choices=list(GAIN_SETS),
+        help="print only this gain set's table (default: all, official first)",
+    )
     args = parser.parse_args()
     names = parse_pipeline_names(args.pipelines)
+    gain_names = [args.gains] if args.gains else list(GAIN_SETS)
 
     con = data.connect(args.data_dir)
     sample = data.load_query_sample(args.data_dir / data.EVAL_QUERY_IDS_FILE)
@@ -132,19 +169,23 @@ def main() -> None:
     print(f"eval queries: {len(queries)} ({no_relevant} with no relevant product)")
     print(f"catalog: {len(catalog):,} products from {len(sample.catalog_query_ids):,} queries")
 
-    results = {}
+    runs = {}
     for name in names:
         pipeline = get_pipeline(name)
         start = time.perf_counter()
         pipeline.index(catalog)
         print(f"{name}: indexed in {time.perf_counter() - start:.1f}s", flush=True)
-        results[name] = {
-            "full": evaluate_full_catalog(pipeline, queries, labels),
-            "rerank": evaluate_reranking(pipeline, queries, labels),
+        runs[name] = {
+            "full": run_full_catalog(pipeline, queries),
+            "rerank": run_reranking(pipeline, queries, labels),
         }
         print(f"{name}: done", flush=True)
-    print()
-    print(format_table(results))
+    for gain_name in gain_names:
+        gains = GAIN_SETS[gain_name]
+        described = ", ".join(f"{label} {value:g}" for label, value in gains.items())
+        headline = " (headline)" if gain_name == next(iter(GAIN_SETS)) else ""
+        print(f"\nNDCG gains: {gain_name}{headline}: {described}\n")
+        print(format_table(score_runs(runs, labels, gains)))
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@ Status: BM25, dense (bge-small), hybrid (RRF) and cross-encoder pipelines, all s
 
 ## Results
 
-500 held-out test queries (US, Task 1 small version, seed 42).
+500 held-out test queries (US, Task 1 small version, seed 42). The tables below use the graded gains; they
+are replaced with official-gains (headline) tables after the next evaluation run.
 
 **Full catalog** (the main setting): each query searches all 48,862 catalog products, which are the products
 labelled for its own query plus 2,499 others. This is the setting with room to improve.
@@ -31,12 +32,17 @@ Most candidates are Exact matches, so BM25 already scores high and there is litt
 
 ### How scores are computed
 
-- **NDCG gains:** Exact 3, Substitute 2, Complement 1, Irrelevant 0, with unlabelled products counting as 0. The esci-data README
-  gives no Task 1 gains, so this is the fallback from CLAUDE.md. Note that it gives substitutes two-thirds credit, which
-  pushes scores up. The esci-data repo's own evaluation script (`ranking/prepare_trec_eval_files.py`) uses
-  E 1.0, S 0.1, C 0.01, I 0. The numbers here are therefore **not** comparable to the README's published 0.83 baseline.
-  All pipelines use the same gains (`ESCI_GAINS` in `src/shopsense/metrics.py`).
-- **Recall@50:** the share of a query's Exact, Substitute and Complement products found in the top 50.
+- **NDCG gains (headline: official).** The headline numbers use the **official ESCI gains**: Exact 1.0,
+  Substitute 0.1, Complement 0.01, Irrelevant 0. These come from the esci-data repo's own Task 1 ranking scripts
+  (`ranking/prepare_trec_eval_files.py`, `ranking/train.py`); the repo README itself states no gains. They put scores
+  on the same gain scale as published ESCI results (the query set and catalog still differ), and they give substitutes almost no credit, so a ranking only scores
+  well if it puts Exact matches first.
+  We also report **graded gains** (E 3, S 2, C 1, I 0, the original CLAUDE.md fallback), which give substitutes
+  two-thirds credit and so score higher. `python scripts/evaluate.py` prints both tables, official first, and
+  `--gains official|graded` picks one. Every pipeline is scored with the same gains (`ESCI_OFFICIAL_GAINS` and
+  `ESCI_GRADED_GAINS` in `src/shopsense/metrics.py`). Unlabelled products count as 0 under both.
+- **Recall@50:** the share of a query's Exact, Substitute and Complement products found in the top 50. It's the same
+  under both gain sets, since every gain except Irrelevant's is positive.
 - **Latency:** median search time per query on a laptop CPU, one query at a time, indexing excluded. p95 and
   re-ranking-only latencies are in `NOTES.md`.
 

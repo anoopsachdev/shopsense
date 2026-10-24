@@ -1,14 +1,17 @@
 import importlib.util
+import sys
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+from shopsense.metrics import ESCI_GRADED_GAINS, ESCI_OFFICIAL_GAINS
 from shopsense.retrieval.bm25 import BM25Retriever
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "evaluate.py"
 spec = importlib.util.spec_from_file_location("evaluate", SCRIPT)
 evaluate = importlib.util.module_from_spec(spec)
+sys.modules["evaluate"] = evaluate  # @dataclass looks its module up in sys.modules
 spec.loader.exec_module(evaluate)
 
 CATALOG = pd.DataFrame(
@@ -28,24 +31,50 @@ def bm25():
     return retriever
 
 
-def test_evaluate_full_catalog_perfect_rankings(bm25):
-    result = evaluate.evaluate_full_catalog(bm25, QUERIES, LABELS)
-    assert result["ndcg@10"] == pytest.approx(1.0)
-    assert result["recall@50"] == pytest.approx(1.0)
-    assert 0 <= result["p50_ms"] <= result["p95_ms"]
+def test_run_full_catalog_records_rankings_and_latency(bm25):
+    run = evaluate.run_full_catalog(bm25, QUERIES)
+    assert run.rankings[1][:2] == ["p1", "p2"]
+    assert run.rankings[2][0] == "p3"
+    assert 0 <= run.p50_ms <= run.p95_ms
 
 
-def test_evaluate_reranking_scores_only_labelled_candidates(bm25):
-    # Query 2's candidates are p3 (E) and p1 (I); BM25 puts p3 first, so NDCG is 1.
-    result = evaluate.evaluate_reranking(bm25, QUERIES, LABELS)
-    assert result["ndcg@10"] == pytest.approx(1.0)
-    assert 0 <= result["p50_ms"] <= result["p95_ms"]
+def test_run_reranking_ranks_only_labelled_candidates(bm25):
+    run = evaluate.run_reranking(bm25, QUERIES, LABELS)
+    assert run.rankings == {1: ["p1", "p2"], 2: ["p3", "p1"]}
 
 
-def test_evaluate_reranking_penalises_wrong_order(bm25):
-    # "blue" ranks p2 (I) above p1 (E): DCG = 0 + 3/log2(3), IDCG = 3, NDCG = 0.6309298.
-    result = evaluate.evaluate_reranking(bm25, {1: "blue"}, {1: {"p1": "E", "p2": "I"}})
-    assert result["ndcg@10"] == pytest.approx(0.6309298, abs=1e-6)
+def test_score_run_perfect_rankings():
+    run = evaluate.Run({1: ["p1", "p2"], 2: ["p3", "p1"]}, p50_ms=1.0, p95_ms=2.0)
+    scores = evaluate.score_run(run, LABELS, ESCI_OFFICIAL_GAINS, with_recall=True)
+    assert scores == {
+        "ndcg@10": pytest.approx(1.0),
+        "recall@50": pytest.approx(1.0),
+        "p50_ms": 1.0,
+        "p95_ms": 2.0,
+    }
+    assert "recall@50" not in evaluate.score_run(run, LABELS, ESCI_OFFICIAL_GAINS, False)
+
+
+def test_score_run_depends_on_the_gain_set():
+    # Substitute p2 above Exact p1 (see test_metrics for the hand computation).
+    run = evaluate.Run({1: ["p2", "p1"]}, p50_ms=0.0, p95_ms=0.0)
+    labels = {1: {"p1": "E", "p2": "S"}}
+    official = evaluate.score_run(run, labels, ESCI_OFFICIAL_GAINS, with_recall=False)
+    graded = evaluate.score_run(run, labels, ESCI_GRADED_GAINS, with_recall=False)
+    assert official["ndcg@10"] == pytest.approx(0.6876, abs=1e-4)
+    assert graded["ndcg@10"] == pytest.approx(0.9134, abs=1e-4)
+
+
+def test_score_runs_scores_both_settings_per_pipeline():
+    full = evaluate.Run({1: ["p1", "p2"]}, p50_ms=5.0, p95_ms=6.0)
+    rerank = evaluate.Run({1: ["p2", "p1"]}, p50_ms=1.0, p95_ms=1.5)
+    labels = {1: {"p1": "E", "p2": "I"}}
+    runs = {"bm25": {"full": full, "rerank": rerank}}
+    result = evaluate.score_runs(runs, labels, ESCI_OFFICIAL_GAINS)
+    # Rerank puts the Irrelevant p2 first: DCG = 1/log2(3), IDCG = 1, NDCG = 0.6309298.
+    assert result["bm25"]["full"]["ndcg@10"] == pytest.approx(1.0)
+    assert result["bm25"]["full"]["p50_ms"] == 5.0
+    assert result["bm25"]["rerank"]["ndcg@10"] == pytest.approx(0.6309298, abs=1e-6)
 
 
 def test_latency_percentiles_in_milliseconds():

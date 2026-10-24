@@ -27,7 +27,7 @@ Data in `data/` (gitignored):
 
 The **search catalog is fixed at 48,862 products**: the products labelled for the 2,500 sampled queries. `data.build_catalog` builds it from `eval_query_ids.json`, and every pipeline searches it, so results stay comparable with the BM25 row. The other ~433k products are stored but never indexed or embedded.
 
-## Results (500 eval queries, seed 42, gains E3/S2/C1/I0)
+## Results (500 eval queries, seed 42, graded gains E3/S2/C1/I0, before the official-gains switch)
 
 `python scripts/evaluate.py --pipelines all`, on a laptop CPU:
 
@@ -49,7 +49,7 @@ None of these numbers are comparable to the esci-data README's 0.83 baseline, be
 
 ## Assumptions and decisions
 
-1. **Gains: E=3, S=2, C=1, I=0.** The esci-data README gives no Task 1 gains, so I used the CLAUDE.md fallback. The repo's own eval code uses different gains: E=1.0, S=0.1, C=0.01, I=0 (`ranking/prepare_trec_eval_files.py` and `ranking/train.py`). To switch, change `ESCI_GAINS` in `metrics.py`, or pass `gains=`.
+1. **Gains: the headline is now the official ESCI gains (E=1.0, S=0.1, C=0.01, I=0).** These come from the repo's ranking scripts (`ranking/prepare_trec_eval_files.py`, `ranking/train.py`); the esci-data README itself gives none. Making them the headline puts the numbers on the same gain scale as published ESCI results (the query set and catalog still differ), and it stops substitutes from inflating scores. The graded gains (E=3, S=2, C=1, I=0, the original CLAUDE.md fallback and the headline until 2026-10-25) are still reported next to them. `ESCI_OFFICIAL_GAINS` is the default in `metrics.py`. `evaluate.py` prints both tables by default, official first; `--gains official|graded` prints one.
 2. **NDCG** uses linear gains with a `1/log2(rank+1)` discount. The ideal ranking comes from all of the query's labelled products. Unlabelled products count as gain 0. A query with no positive-gain product scores 0, which never happens in the current eval set.
 3. **Recall@k** is binary: relevant means gain > 0 (E, S or C), and recall is the share of those found in the top k. "Graded" applies to NDCG only.
 4. **Distractor queries come from the train split**, 2,000 of them, so the test queries outside the eval set stay untouched. Total catalog queries: 2,500.
@@ -67,8 +67,7 @@ None of these numbers are comparable to the esci-data README's 0.83 baseline, be
 16. **Pipeline configs** look like `{"retriever": ..., "reranker": ..., "rerank_depth": ...}`, with unknown keys or names raising `ValueError`. Hybrid is always BM25 + dense. Swapping a stage is a config change.
 17. **Untested on purpose:** `FastEmbedEncoder` and `load_cross_encoder` aren't unit-tested, because they download models. Every class that uses them takes an injectable encoder or scorer, and tests pass fakes. The real models were exercised by `build_index.py` and the evaluation run.
 18. **Model caches:** fastembed keeps bge-small under the system temp dir (`$TMPDIR/fastembed_cache`), which macOS may clear; it re-downloads in under a minute. The cross-encoder is in `~/.cache/huggingface`.
-19. **Gains are still E3/S2/C1/I0 (CLAUDE.md fallback).** I checked again: the esci-data README states no gains. The E1/S0.1/C0.01 values appear only in the repo's ranking scripts. The README now says which gains are used and that every pipeline uses them.
-20. Nothing touches the LLM, GCP or the API.
+19. Nothing touches the LLM, GCP or the API.
 
 ## What failed or needs your attention
 
