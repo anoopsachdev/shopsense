@@ -93,6 +93,8 @@ def test_parse_pipeline_names():
         "hybrid",
         "hybrid+cross_encoder",
         "hybrid+cross_encoder_fast",
+        "hybrid+llm",
+        "intent+hybrid+llm",
     ]
     assert evaluate.parse_pipeline_names("bm25, hybrid") == ["bm25", "hybrid"]
     with pytest.raises(ValueError, match="unknown pipelines"):

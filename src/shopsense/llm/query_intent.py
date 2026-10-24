@@ -12,10 +12,16 @@ If the call fails or the answer doesn't parse, the extractor returns a neutral i
 from __future__ import annotations
 
 import json
+import re
+import threading
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+import pandas as pd
+
 from shopsense.llm.client import LLMClient, LLMError
+from shopsense.retrieval.base import Hit
 
 INTENT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -84,8 +90,9 @@ def parse_intent(text: str, query: str) -> QueryIntent:
     missing = set(INTENT_SCHEMA["required"]) - set(payload)
     if missing:
         raise ValueError(f"missing fields {sorted(missing)}")
+    product_type = _clean_text(payload["product_type"]) or neutral_intent(query).product_type
     return QueryIntent(
-        product_type=_clean_text(payload["product_type"]) or neutral_intent(query).product_type,
+        product_type=product_type,
         brand=_clean_text(payload["brand"]),
         color=_clean_text(payload["color"]),
         attributes=_clean_list(payload["attributes"]),
@@ -94,10 +101,11 @@ def parse_intent(text: str, query: str) -> QueryIntent:
 
 
 class QueryIntentExtractor:
-    """Calls the intent model and keeps counts and cost for evaluation."""
+    """Calls the intent model and keeps counts and cost for evaluation (thread-safe)."""
 
     def __init__(self, client: LLMClient) -> None:
         self.client = client
+        self._lock = threading.Lock()
         self.reset_stats()
 
     def reset_stats(self) -> None:
@@ -109,17 +117,86 @@ class QueryIntentExtractor:
 
         BudgetExceeded is not caught: it stops the run.
         """
-        self.stats["calls"] += 1
         try:
             response = self.client.generate(
                 f"Query: {query}", system=SYSTEM_PROMPT, response_schema=INTENT_SCHEMA
             )
         except LLMError:
-            self.stats["failures"] += 1
+            self._record(0.0, failed=True)
             return neutral_intent(query)
-        self.stats["cost_usd"] += response.cost_usd
         try:
-            return parse_intent(response.text, query)
+            intent = parse_intent(response.text, query)
         except ValueError:
-            self.stats["failures"] += 1
+            self._record(response.cost_usd, failed=True)
             return neutral_intent(query)
+        self._record(response.cost_usd, failed=False)
+        return intent
+
+    def _record(self, cost: float, failed: bool) -> None:
+        with self._lock:
+            self.stats["calls"] += 1
+            self.stats["cost_usd"] += cost
+            self.stats["failures"] += int(failed)
+
+
+def mentions(term: str, text: str) -> bool:
+    """True if `term` appears in `text` as whole words, ignoring case."""
+    return re.search(rf"(?<!\w){re.escape(term.lower())}(?!\w)", text.lower()) is not None
+
+
+class IntentBooster:
+    """Pipeline stage: re-orders retrieved hits using the query's intent.
+
+    Drops hits whose title mentions an exclusion, then moves hits that match the
+    intent's brand and color up: hits matching both first, then one, then neither,
+    keeping retriever order within each group.
+    """
+
+    def __init__(self, extractor: QueryIntentExtractor) -> None:
+        self.extractor = extractor
+        self._fields: dict[str, tuple[str, str, str]] = {}
+
+    @property
+    def stats(self) -> dict[str, float]:
+        """The extractor's call, failure and cost counters."""
+        return self.extractor.stats
+
+    def reset_stats(self) -> None:
+        """Zero the extractor's counters."""
+        self.extractor.reset_stats()
+
+    def index(self, catalog: pd.DataFrame) -> None:
+        """Keep each product's title, brand and color."""
+        def text(column: str) -> list[str]:
+            if column not in catalog:
+                return [""] * len(catalog)
+            return catalog[column].fillna("").astype(str).tolist()
+
+        self._fields = dict(
+            zip(
+                catalog["product_id"],
+                zip(text("product_title"), text("product_brand"), text("product_color")),
+            )
+        )
+
+    def apply(self, query: str, hits: Sequence[Hit]) -> list[Hit]:
+        """Hits without excluded products, brand/color matches first."""
+        intent = self.extractor.extract(query)
+
+        def excluded(hit: Hit) -> bool:
+            title = self._fields[hit.product_id][0]
+            return any(mentions(term, title) for term in intent.exclusions)
+
+        kept = [hit for hit in hits if not excluded(hit)]
+
+        def matches(hit: Hit) -> int:
+            title, brand, color = self._fields[hit.product_id]
+            brand_match = intent.brand is not None and (
+                mentions(intent.brand, brand) or mentions(intent.brand, title)
+            )
+            color_match = intent.color is not None and (
+                mentions(intent.color, color) or mentions(intent.color, title)
+            )
+            return int(brand_match) + int(color_match)
+
+        return sorted(kept, key=lambda hit: -matches(hit))  # stable

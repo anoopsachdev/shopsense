@@ -3,14 +3,19 @@ import json
 import pytest
 
 from shopsense.llm.client import BudgetExceeded, LLMError, LLMResponse
+import pandas as pd
+
 from shopsense.llm.query_intent import (
     INTENT_SCHEMA,
     SYSTEM_PROMPT,
+    IntentBooster,
     QueryIntent,
     QueryIntentExtractor,
+    mentions,
     neutral_intent,
     parse_intent,
 )
+from shopsense.retrieval.base import Hit
 
 
 def answer(product_type, brand=None, color=None, attributes=(), exclusions=()):
@@ -122,3 +127,66 @@ def test_stats_accumulate_cost_and_reset():
     assert extractor.stats == {"calls": 2, "failures": 0, "cost_usd": pytest.approx(0.002)}
     extractor.reset_stats()
     assert extractor.stats == {"calls": 0, "failures": 0, "cost_usd": 0.0}
+
+
+def test_mentions_matches_whole_words_only():
+    assert mentions("Red", "Bright red dress")
+    assert mentions("size 10", "Shoes, size 10, wide")
+    assert not mentions("red", "Embroidered dress")
+    assert not mentions("otterbox", "")
+
+
+class FixedExtractor:
+    def __init__(self, intent):
+        self.intent = intent
+        self.stats = {"calls": 0, "failures": 0, "cost_usd": 0.0}
+
+    def extract(self, query):
+        return self.intent
+
+    def reset_stats(self):
+        self.stats = {"calls": 0}
+
+
+BOOST_CATALOG = pd.DataFrame(
+    {
+        "product_id": ["p1", "p2", "p3", "p4", "p5"],
+        "product_title": [
+            "Running shoes",
+            "OtterBox iPhone 14 case",
+            "Red running shoes",
+            "Trail shoes",
+            "Shoes by Nike, red laces",
+        ],
+        "product_brand": ["Acme", "OtterBox", "Acme", "Nike", None],
+        "product_color": ["blue", "black", None, "Red", None],
+    }
+)
+HITS = [Hit(f"p{i}", 10.0 - i) for i in range(1, 6)]
+
+
+def boost(intent, hits=HITS):
+    booster = IntentBooster(FixedExtractor(intent))
+    booster.index(BOOST_CATALOG)
+    return [hit.product_id for hit in booster.apply("q", hits)]
+
+
+def test_booster_moves_brand_and_color_matches_up_keeping_order():
+    # p4: brand Nike + color red (2); p5: Nike and red in title (2); p3: red title (1).
+    intent = QueryIntent("shoes", brand="nike", color="red")
+    assert boost(intent) == ["p4", "p5", "p3", "p1", "p2"]
+
+
+def test_booster_drops_titles_that_mention_an_exclusion():
+    assert boost(QueryIntent("case", exclusions=("otterbox", "trail"))) == ["p1", "p3", "p5"]
+
+
+def test_booster_with_neutral_intent_keeps_retriever_order():
+    assert boost(QueryIntent("shoes")) == ["p1", "p2", "p3", "p4", "p5"]
+
+
+def test_booster_exposes_and_resets_extractor_stats():
+    booster = IntentBooster(FixedExtractor(QueryIntent("x")))
+    assert booster.stats == {"calls": 0, "failures": 0, "cost_usd": 0.0}
+    booster.reset_stats()
+    assert booster.stats == {"calls": 0}

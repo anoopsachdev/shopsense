@@ -1,12 +1,16 @@
 import pandas as pd
 import pytest
 
+from shopsense import pipeline as pipeline_module
+from shopsense.llm.client import LLMResponse
+from shopsense.llm.query_intent import IntentBooster
 from shopsense.pipeline import (
     PIPELINES,
     Pipeline,
     build_pipeline,
     get_pipeline,
 )
+from shopsense.rerank.llm import LLMReranker
 from shopsense.rerank.base import Reranker
 from shopsense.rerank.cross_encoder import CrossEncoderReranker
 from shopsense.retrieval.base import Hit, Retriever
@@ -51,8 +55,34 @@ FAKE_RETRIEVERS = {"list": ListRetriever}
 FAKE_RERANKERS = {"reverse": ReverseReranker}
 
 
+class DropA2Intent:
+    """Fake intent stage: drops a2, moves a4 first; counts calls like the real one."""
+
+    def __init__(self):
+        self.indexed = False
+        self.stats = {"calls": 0, "failures": 0, "cost_usd": 0.0}
+
+    def index(self, catalog):
+        self.indexed = True
+
+    def reset_stats(self):
+        self.stats = {"calls": 0, "failures": 0, "cost_usd": 0.0}
+
+    def apply(self, query, hits):
+        self.stats["calls"] += 1
+        self.stats["cost_usd"] += 0.5
+        kept = [hit for hit in hits if hit.product_id != "a2"]
+        return sorted(kept, key=lambda hit: hit.product_id != "a4")
+
+
+FAKE_INTENTS = {"drop_a2": DropA2Intent}
+ZERO_STATS = {"calls": 0, "cost_usd": 0.0, "rerank_calls": 0, "fallbacks": 0}
+
+
 def build(config):
-    return build_pipeline(config, retrievers=FAKE_RETRIEVERS, rerankers=FAKE_RERANKERS)
+    return build_pipeline(
+        config, retrievers=FAKE_RETRIEVERS, rerankers=FAKE_RERANKERS, intents=FAKE_INTENTS
+    )
 
 
 def test_build_retriever_only_pipeline():
@@ -115,6 +145,8 @@ def test_named_pipelines_build_with_the_real_stages():
         "hybrid",
         "hybrid+cross_encoder",
         "hybrid+cross_encoder_fast",
+        "hybrid+llm",
+        "intent+hybrid+llm",
     ]
     assert isinstance(get_pipeline("bm25").retriever, BM25Retriever)
     assert isinstance(get_pipeline("dense").retriever, DenseRetriever)
@@ -129,6 +161,76 @@ def test_named_pipelines_build_with_the_real_stages():
     assert isinstance(fast.retriever, HybridRetriever)
     assert isinstance(fast.reranker, CrossEncoderReranker)
     assert fast.rerank_depth == 20
+
+
+def test_intent_stage_runs_between_retriever_and_reranker():
+    config = {"retriever": "list", "intent": "drop_a2", "reranker": "reverse", "rerank_depth": 3}
+    pipeline = build(config)
+    hits = pipeline.search("q", k=5)
+    assert pipeline.reranker.seen == ["a4", "a1", "a3"]
+    assert [hit.product_id for hit in hits] == ["a3", "a1", "a4", "a5"]
+
+
+def test_intent_stage_without_reranker():
+    pipeline = build({"retriever": "list", "intent": "drop_a2"})
+    assert [hit.product_id for hit in pipeline.search("q", k=2)] == ["a4", "a1"]
+
+
+def test_index_reaches_the_intent_stage():
+    pipeline = build({"retriever": "list", "intent": "drop_a2"})
+    pipeline.index(pd.DataFrame({"product_id": []}))
+    assert pipeline.intent.indexed
+
+
+def test_unknown_intent_is_rejected():
+    with pytest.raises(ValueError, match="unknown intent 'nope'"):
+        build({"retriever": "list", "intent": "nope"})
+
+
+def test_llm_stats_sum_intent_and_reranker_and_reset():
+    class CountingReranker(ReverseReranker):
+        stats = {"calls": 2, "fallbacks": 1, "cost_usd": 0.25}
+
+        def reset_stats(self):
+            self.stats = {"calls": 0, "fallbacks": 0, "cost_usd": 0.0}
+
+    pipeline = Pipeline(ListRetriever(), CountingReranker(), 3, DropA2Intent())
+    pipeline.search("q", k=3)
+    assert pipeline.llm_stats() == {"calls": 3, "cost_usd": 0.75, "rerank_calls": 2, "fallbacks": 1}
+    pipeline.reset_llm_stats()
+    assert pipeline.llm_stats() == ZERO_STATS
+
+
+def test_llm_stats_are_zero_without_llm_stages():
+    pipeline = build({"retriever": "list", "reranker": "reverse"})
+    assert pipeline.llm_stats() == ZERO_STATS
+    assert not pipeline.uses_llm
+
+
+def test_llm_pipelines_build_with_their_clients(monkeypatch):
+    made = []
+
+    class FakeClient:
+        def generate(self, prompt, system=None, response_schema=None):
+            return LLMResponse("{}", 0, 0, 0.0, 0.0, 0.0, False)
+
+    def fake_make_client(role, **kwargs):
+        made.append((role, kwargs))
+        return FakeClient()
+
+    monkeypatch.setattr(pipeline_module.llm_client, "make_client", fake_make_client)
+    plain = get_pipeline("hybrid+llm")
+    assert isinstance(plain.reranker, LLMReranker)
+    assert isinstance(plain.reranker.fallback, CrossEncoderReranker)
+    assert plain.rerank_depth == 20 and plain.intent is None and plain.uses_llm
+    with_intent = get_pipeline("intent+hybrid+llm")
+    assert isinstance(with_intent.intent, IntentBooster)
+    assert isinstance(with_intent.retriever, HybridRetriever)
+    assert made == [
+        ("rerank", {"timeout_s": 60.0, "max_retries": 1}),
+        ("rerank", {"timeout_s": 60.0, "max_retries": 1}),
+        ("intent", {"timeout_s": 15.0}),
+    ]
 
 
 def test_get_pipeline_rejects_unknown_name():
