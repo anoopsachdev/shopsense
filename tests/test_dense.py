@@ -38,7 +38,7 @@ class FakeEncoder:
 
 @pytest.fixture
 def retriever():
-    dense = DenseRetriever(encoder=FakeEncoder())
+    dense = DenseRetriever(encoder=FakeEncoder(), allow_build=True)
     dense.index(CATALOG)
     return dense
 
@@ -71,18 +71,44 @@ def test_search_with_candidates_only_scores_candidates(retriever):
 def test_index_saves_then_reuses_vectors(tmp_path):
     path = tmp_path / "v.npz"
     encoder = FakeEncoder()
-    DenseRetriever(encoder=encoder, vectors_path=path).index(CATALOG)
+    DenseRetriever(encoder=encoder, vectors_path=path, allow_build=True).index(CATALOG)
     reloaded = DenseRetriever(encoder=encoder, vectors_path=path)
     reloaded.index(CATALOG)
     assert encoder.document_calls == 1
     assert reloaded.search("jacket", k=1)[0].product_id == "p2"
 
 
-def test_index_rejects_vectors_for_a_different_catalog(tmp_path):
+def test_index_rejects_stale_vectors_by_default(tmp_path):
     path = tmp_path / "v.npz"
-    DenseRetriever(encoder=FakeEncoder(), vectors_path=path).index(CATALOG)
-    with pytest.raises(ValueError, match="different catalog"):
-        DenseRetriever(encoder=FakeEncoder(), vectors_path=path).index(CATALOG.iloc[:2])
+    DenseRetriever(encoder=FakeEncoder(), vectors_path=path, allow_build=True).index(CATALOG)
+    encoder = FakeEncoder()
+    with pytest.raises(ValueError, match="different catalog.*build_index.py"):
+        DenseRetriever(encoder=encoder, vectors_path=path).index(CATALOG.iloc[:2])
+    assert encoder.document_calls == 0
+
+
+def test_index_rejects_missing_vectors_by_default(tmp_path):
+    encoder = FakeEncoder()
+    with pytest.raises(FileNotFoundError, match="build_index.py"):
+        DenseRetriever(encoder=encoder, vectors_path=tmp_path / "missing.npz").index(CATALOG)
+    assert encoder.document_calls == 0
+
+
+def test_index_without_a_path_needs_allow_build():
+    with pytest.raises(FileNotFoundError, match="build_index.py"):
+        DenseRetriever(encoder=FakeEncoder()).index(CATALOG)
+
+
+def test_allow_build_rebuilds_stale_vectors(tmp_path):
+    path = tmp_path / "v.npz"
+    DenseRetriever(encoder=FakeEncoder(), vectors_path=path, allow_build=True).index(CATALOG)
+    smaller = CATALOG.iloc[:2]
+    DenseRetriever(encoder=FakeEncoder(), vectors_path=path, allow_build=True).index(smaller)
+    assert load_vectors(path)[0] == ["p1", "p2"]
+
+
+def test_default_retriever_does_not_build():
+    assert DenseRetriever(encoder=FakeEncoder()).allow_build is False
 
 
 def test_search_before_index_raises():

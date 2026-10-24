@@ -73,33 +73,55 @@ def load_vectors(path: Path) -> tuple[list[str], np.ndarray]:
 class DenseRetriever(Retriever):
     """Cosine similarity between the query vector and every product vector."""
 
-    def __init__(self, encoder: Encoder | None = None, vectors_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        encoder: Encoder | None = None,
+        vectors_path: Path | None = None,
+        allow_build: bool = False,
+    ) -> None:
+        """`allow_build` lets `index` embed the catalog when the saved vectors are missing
+        or stale. Embedding is slow (~2 h on a laptop CPU), so only build_index.py sets it.
+        """
         self.encoder = encoder or FastEmbedEncoder()
         self.vectors_path = vectors_path
+        self.allow_build = allow_build
         self._product_ids: list[str] = []
         self._position: dict[str, int] = {}
         self._vectors: np.ndarray | None = None
 
     def index(self, catalog: pd.DataFrame) -> None:
-        """Load saved vectors for this catalog, or embed the catalog (and save, if a path is set).
+        """Load the saved vectors for this catalog.
 
-        Raises ValueError if the saved vectors were built for a different catalog.
+        If they are missing or were built for a different catalog, embed the catalog (and
+        save, if a path is set) when `allow_build` is True; otherwise raise
+        FileNotFoundError (missing) or ValueError (stale), pointing to build_index.py.
         """
         product_ids = catalog["product_id"].tolist()
-        if self.vectors_path is not None and self.vectors_path.exists():
-            saved_ids, vectors = load_vectors(self.vectors_path)
-            if saved_ids != product_ids:
-                raise ValueError(
-                    f"{self.vectors_path} was built for a different catalog; "
-                    "rerun scripts/build_index.py"
-                )
-        else:
+        vectors = self._load_saved(product_ids)
+        if vectors is None:
             vectors = normalize(self.encoder.embed_documents(catalog_texts(catalog)))
             if self.vectors_path is not None:
                 save_vectors(self.vectors_path, product_ids, vectors)
         self._product_ids = product_ids
         self._position = {pid: i for i, pid in enumerate(product_ids)}
         self._vectors = vectors
+
+    def _load_saved(self, product_ids: list[str]) -> np.ndarray | None:
+        """Saved vectors if they match `product_ids`; None if building is allowed instead."""
+        rebuild = "run `PYTHONPATH=src python scripts/build_index.py` to embed the catalog"
+        if self.vectors_path is None or not self.vectors_path.exists():
+            if self.allow_build:
+                return None
+            raise FileNotFoundError(f"no saved dense vectors at {self.vectors_path}; {rebuild}")
+        saved_ids, vectors = load_vectors(self.vectors_path)
+        if saved_ids == product_ids:
+            return vectors
+        if self.allow_build:
+            return None
+        raise ValueError(
+            f"{self.vectors_path} was built for a different catalog "
+            f"({len(saved_ids):,} products, this one has {len(product_ids):,}); {rebuild}"
+        )
 
     def search(
         self, query: str, k: int, candidate_ids: Sequence[str] | None = None

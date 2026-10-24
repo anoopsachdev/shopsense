@@ -27,7 +27,9 @@ def build_dense_index(
     vectors_path.unlink(missing_ok=True)
     print(f"embedding {len(catalog):,} products")
     start = time.perf_counter()
-    DenseRetriever(encoder=encoder, vectors_path=vectors_path).index(catalog)
+    # The one place allowed to embed: everything else only loads the saved vectors.
+    dense = DenseRetriever(encoder=encoder, vectors_path=vectors_path, allow_build=True)
+    dense.index(catalog)
     return time.perf_counter() - start
 
 
