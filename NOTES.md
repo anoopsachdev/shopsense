@@ -1,4 +1,4 @@
-# Notes: data, metrics, BM25, dense, hybrid and cross-encoder
+# Notes: data, retrieval, reranking and the LLM layer
 
 ## What was built
 
@@ -15,8 +15,18 @@
 | 10 Cross-encoder | `src/shopsense/rerank/base.py`, `cross_encoder.py`, tests | `c91ba1a` |
 | 11 Pipeline config | `src/shopsense/pipeline.py`, `tests/test_pipeline.py` | `e53d3ae` |
 | 12 Evaluation table | `scripts/evaluate.py` (all pipelines, p50/p95), tests | `8bbc47f` |
+| 13 Official gains headline | `metrics.py`, `evaluate.py --gains`, README | `b547f72` |
+| 14 Cross-encoder speed | `max_length=256`, `hybrid+cross_encoder_fast` (depth 20) | `ed8fb8d` |
+| 15 Dense build guard | `DenseRetriever(allow_build=False)` | `6e4a960` |
+| 16 CLAUDE.md in repo | Python 3.12, `PYTHONPATH=src` commands | `41c1737` |
+| 17 LLM preflight | `.env.example`, `.gitignore` | `d7ad76e` |
+| 18 LLM client | `src/shopsense/llm/client.py` | `768ac84` |
+| 19 Query intent | `src/shopsense/llm/query_intent.py` | `c416c24` |
+| 20 LLM reranker | `src/shopsense/rerank/llm.py` | `707698d` |
+| 21 LLM pipelines | `hybrid+llm`, `intent+hybrid+llm` in `pipeline.py` | `5683869` |
+| 22 LLM evaluation | `evaluate.py`: 200-query subset, cost, slices, regressions | `d93debc` |
 
-`pytest -q`: 73 passed.
+`pytest -q`: 153 passed.
 
 Data in `data/` (gitignored):
 - `examples.parquet`: 601,354 rows (US, `small_version == 1`, both splits). This matches the README's US Task 1 count.
@@ -27,25 +37,105 @@ Data in `data/` (gitignored):
 
 The **search catalog is fixed at 48,862 products**: the products labelled for the 2,500 sampled queries. `data.build_catalog` builds it from `eval_query_ids.json`, and every pipeline searches it, so results stay comparable with the BM25 row. The other ~433k products are stored but never indexed or embedded.
 
-## Results (500 eval queries, seed 42, graded gains E3/S2/C1/I0, before the official-gains switch)
+## Results (2026-10-25 run, `python scripts/evaluate.py --pipelines all`)
 
-`python scripts/evaluate.py --pipelines all`, on a laptop CPU:
+The headline uses **official ESCI gains** (E 1.0, S 0.1, C 0.01, I 0); graded-gain tables follow. Non-LLM pipelines ran one query at a time on all 500 eval queries, before any LLM work started. LLM pipelines ran on the fixed 200-query subset, 8 queries at a time. Cross-encoders use `max_length=256`.
+
+### All 500 eval queries, official gains (headline)
 
 | Pipeline | Full NDCG@10 | Full Recall@50 | Full p50 ms | Full p95 ms | Rerank NDCG@10 | Rerank p50 ms | Rerank p95 ms |
 |---|---|---|---|---|---|---|---|
-| bm25 | 0.5270 | 0.6032 | 49.6 | 89.6 | 0.8293 | 1.2 | 1.3 |
-| dense | 0.5627 | 0.6628 | 17.7 | 19.8 | 0.8517 | 2.9 | 3.9 |
-| hybrid | 0.5828 | 0.6871 | 65.3 | 104.6 | 0.8451 | 4.4 | 5.2 |
-| hybrid+cross_encoder | 0.6298 | 0.6871 | 1193.9 | 1428.0 | 0.8503 | 400.0 | 1161.9 |
+| bm25 | 0.4677 | 0.6032 | 63.5 | 118.0 | 0.7061 | 1.9 | 2.1 |
+| dense | 0.5064 | 0.6628 | 43.0 | 61.7 | 0.7339 | 8.7 | 14.4 |
+| hybrid | 0.5195 | 0.6871 | 102.5 | 201.7 | 0.7288 | 14.0 | 47.5 |
+| hybrid+cross_encoder | 0.5738 | 0.6871 | 1156.1 | 2375.1 | 0.7442 | 426.7 | 996.2 |
+| hybrid+cross_encoder_fast | 0.5643 | 0.6871 | 632.0 | 1207.5 | 0.7447 | 387.5 | 682.7 |
 
-- **Full catalog** is where the gains are. Dense beats BM25 by +0.036 NDCG@10. Hybrid adds another +0.020 and has the best Recall@50 (0.687). The cross-encoder takes NDCG@10 to 0.630, +0.103 over BM25, at about 1.2 s per query.
-- **Hybrid and hybrid+cross_encoder have the same Recall@50 by construction.** The cross-encoder only re-orders the top 50 hybrid hits, so the set it returns is unchanged.
-- **Re-ranking only** barely moves: 0.829 to 0.852. Most candidates are Exact matches. The cross-encoder (0.850) doesn't beat plain dense (0.852) here.
-- **BM25 reproduces exactly** after the full products re-download and the venv rebuild. All 500 eval queries have at least one E/S/C product.
-- **Latency** is search time per query, run sequentially, with indexing excluded. Dense p50 (18 ms) includes embedding the query. The cross-encoder dominates its pipeline's latency: 50 pairs of up to 512 tokens on CPU.
-- **Embedding the catalog took 7,804 s (about 2 h 10 min)** on this laptop's CPU, at roughly 6 products/s and 2.7 GB peak RAM (`scripts/build_index.py`). It only needs to run again if the catalog, model or text fields change.
+**The fast cross-encoder** reranks the top 20 instead of 50. It's about 1.8× faster on the full catalog (p50 632 vs 1,156 ms; p95 1,208 vs 2,375 ms), costs 0.0095 NDCG@10, and is tied in the re-ranking setting. In the previous run, with `max_length=512` and depth 50, the cross-encoder scored 0.6298 graded at 1,194 ms p50; at 256 it scores 0.6300 graded at 1,156 ms. So truncating to 256 lost nothing.
 
-None of these numbers are comparable to the esci-data README's 0.83 baseline, because that used different gains and a different query set.
+### LLM subset (200 queries), official gains (headline)
+
+| Pipeline | Full NDCG@10 | Full Recall@50 | Full p50 ms | Full p95 ms | Full $/1K q | Full fallback | Rerank NDCG@10 | Rerank p50 ms | Rerank p95 ms | Rerank $/1K q | Rerank fallback |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| bm25 | 0.4703 | 0.5941 | 62.8 | 105.1 | 0.00 | 0.0% | 0.7111 | 1.9 | 2.1 | 0.00 | 0.0% |
+| dense | 0.4755 | 0.6489 | 43.1 | 63.1 | 0.00 | 0.0% | 0.7212 | 8.9 | 15.6 | 0.00 | 0.0% |
+| hybrid | 0.5041 | 0.6803 | 105.2 | 197.3 | 0.00 | 0.0% | 0.7298 | 14.0 | 47.0 | 0.00 | 0.0% |
+| hybrid+cross_encoder | 0.5772 | 0.6803 | 1170.2 | 2163.0 | 0.00 | 0.0% | 0.7493 | 419.4 | 955.1 | 0.00 | 0.0% |
+| hybrid+cross_encoder_fast | 0.5651 | 0.6803 | 624.7 | 1207.5 | 0.00 | 0.0% | 0.7499 | 384.4 | 669.7 | 0.00 | 0.0% |
+| hybrid+llm | 0.6004 | 0.6803 | 53315.0 | 117075.2 | 1.14 | 27.5% | 0.8006 | 63457.2 | 115861.2 | 0.76 | 45.0% |
+| intent+hybrid+llm | **0.6074** | 0.6626 | 3119.9 | 116815.5 | 1.42 | 23.5% | **0.8008** | 2489.8 | 115146.4 | 1.12 | 35.0% |
+
+- **The fallback columns understate the LLM.** Fallback queries were ranked by the cross-encoder, so these rows mix LLM and cross-encoder rankings. Almost all fallbacks came from **HTTP 500s from `gemini-3.8-flash`**, not timeouts: the log has 377 "ServerError, retry" lines and 1 ClientError. A call that fails twice falls back.
+- **`intent+hybrid+llm`'s p50 latency (3.1 s) is not comparable.** Whenever its intent changed nothing, its rerank prompt matched `hybrid+llm`'s exactly, so it was answered from the cache. Its p95 (117 s) is the real uncached latency: two 60 s attempts.
+- **Spend:** 938 LLM calls, of which 388 were cache hits. List-price cost was $0.89; actually billed was $0.57. Total logged spend is **$0.59 of the $3 cap**.
+
+### Graded gains (E 3, S 2, C 1, I 0)
+
+| Pipeline (500 queries) | Full NDCG@10 | Full Recall@50 | Rerank NDCG@10 |
+|---|---|---|---|
+| bm25 | 0.5270 | 0.6032 | 0.8293 |
+| dense | 0.5627 | 0.6628 | 0.8517 |
+| hybrid | 0.5828 | 0.6871 | 0.8451 |
+| hybrid+cross_encoder | 0.6300 | 0.6871 | 0.8509 |
+| hybrid+cross_encoder_fast | 0.6214 | 0.6871 | 0.8508 |
+
+| Pipeline (200-query LLM subset) | Full NDCG@10 | Rerank NDCG@10 |
+|---|---|---|
+| hybrid+cross_encoder_fast | 0.6159 | 0.8521 |
+| hybrid+llm | 0.6494 | 0.8884 |
+| intent+hybrid+llm | 0.6530 | 0.8873 |
+
+Latency, cost and fallback rate are the same as in the official tables; only NDCG changes with the gains. BM25 graded numbers match the earlier runs exactly.
+
+### NDCG@10 by query slice (LLM subset, full catalog, official gains)
+
+| Pipeline | all (n=200) | short (n=41) | long (n=26) | brand (n=32) | negation (n=12) |
+|---|---|---|---|---|---|
+| bm25 | 0.4703 | 0.3814 | 0.4756 | 0.6200 | 0.4870 |
+| dense | 0.4755 | 0.3655 | 0.4742 | 0.6288 | 0.4090 |
+| hybrid | 0.5041 | 0.4140 | 0.5204 | 0.6446 | 0.4819 |
+| hybrid+cross_encoder | 0.5772 | 0.4537 | 0.5783 | 0.7471 | 0.5031 |
+| hybrid+cross_encoder_fast | 0.5651 | 0.4372 | 0.5678 | 0.7517 | 0.4721 |
+| hybrid+llm | 0.6004 | 0.4934 | 0.5326 | 0.8022 | 0.4352 |
+| intent+hybrid+llm | 0.6074 | 0.5136 | 0.5622 | 0.8139 | 0.3721 |
+
+### Biggest regressions against hybrid+cross_encoder_fast (full catalog, official gains)
+
+The 10 worst of the 20 printed for each pipeline (the full lists are in the run log):
+
+| Query | fast CE | hybrid+llm | intent+hybrid+llm |
+|---|---|---|---|
+| cemetery without crosses | 0.884 | (not among its 20 worst) | 0.030 (fell back) |
+| loud bluetooth headset | 0.608 | (not among its 20 worst) | 0.052 |
+| 1 ear headset without microphone | 0.553 | 0.000 | 0.000 |
+| food freeze dryer machine not dehydrator | 0.512 | 0.108 | 0.191 (fell back) |
+| facet machine lapidary | 0.963 | 0.580 | 0.580 |
+| car ramps and anti skid | 0.694 | 0.356 | 0.356 |
+| adidas sweats slim | 0.764 | 0.445 | 0.445 |
+| cowboy boot spurs | 0.290 | 0.000 | 0.000 |
+| liquor opener | 0.649 | 0.359 | 0.359 |
+| 48 round dining table | 0.744 | 0.522 | 0.522 |
+
+### Three findings
+
+1. **The LLM reranker ranks best, but it can't serve live traffic as configured.** On the full catalog, `hybrid+llm` beats the fast cross-encoder by +0.035 NDCG@10 (0.600 vs 0.565) and the depth-50 one by +0.023. In the re-ranking setting it gains +0.05 (0.801 vs 0.750), even though 27–45% of its queries actually fell back to the cross-encoder. It costs about $1.14 per 1,000 queries. But the model took about 50 s per call under load (p95 117 s, two 60 s attempts) and returned HTTP 500s often. As it stands it's suitable for offline judging or caching popular queries, not interactive search.
+2. **The gains come from short and brand queries.** On brand queries the LLM scores 0.80–0.81 against 0.75 for the fast cross-encoder; on short queries, 0.49–0.51 against 0.44. On long queries (6+ words) plain `hybrid+llm` is *worse* than the fast cross-encoder (0.533 vs 0.568). Our 300-character product snippets probably cut off the details those queries ask about.
+3. **Taking "without X" literally scores worse against ESCI labels.** On the 12 negation queries the LLM drops to 0.435, and intent exclusions drop it to 0.372, against 0.472 for the fast cross-encoder. The worst losses are queries like "cemetery without crosses" (0.88 → 0.03) and "1 ear headset without microphone" (0.55 → 0). Annotators often labelled products as Exact even when they include the excluded thing, so removing them is penalized. Overall the intent stage nets only +0.007 NDCG@10, and it costs Recall@50 (0.663 vs 0.680) because of the products it drops. The slice is small (n=12), so treat this as a direction, not a measurement.
+
+## LLM preflight (2026-10-25)
+
+| Check | Result |
+|---|---|
+| `.env` with the given values | ✅ created (gitignored) |
+| `.env.example` with placeholders | ✅ committed. Fixed: the `.env.*` rule was ignoring it, so I added `!.env.example`. |
+| `.env` ignored and not staged | ✅ (`git check-ignore` matches it; nothing staged) |
+| gcloud installed | ✅ Google Cloud SDK 581.0.0 (`/opt/homebrew/bin/gcloud`) |
+| Application Default Credentials | ✅ `~/.config/gcloud/application_default_credentials.json`, type authorized_user |
+| Quota project shopsense-512615 | ✅ ADC `quota_project_id` and `gcloud config` project both match |
+| `gemini-3.5-flash-lite` @ global | ✅ answered "ok" (7 in, 1 out) |
+| `gemini-3.8-flash` @ global | ✅ answered "ok" once thinking was off. The first call, capped at 16 output tokens, spent them all on thinking and returned no text. One default-settings call returned a transient 500, which passed on retry. |
+
+Neither model returned "not found", so `GOOGLE_CLOUD_LOCATION` stays `global`.
 
 ## Assumptions and decisions
 
@@ -61,13 +151,45 @@ None of these numbers are comparable to the esci-data README's 0.83 baseline, be
 10. **Python 3.12 instead of 3.11.** 3.11 isn't installed. `pyproject.toml` says `>=3.11`. `.venv` is now an isolated venv built with `pip install -e ".[dev]"`, with no Anaconda packages visible. The first version reused Anaconda's site-packages, and its old torch, torchvision and torchaudio broke sentence-transformers.
 11. **Evaluation helpers live in `scripts/evaluate.py`** to keep to the CLAUDE.md layout. Tests load the scripts through `importlib`. `--pipelines all` or a comma list chooses pipelines by name from `pipeline.PIPELINES`.
 12. **Dense:** `BAAI/bge-small-en-v1.5` through fastembed (ONNX, CPU), using `passage_embed` for products and `query_embed` for queries. I added no BGE query instruction prefix. It uses the same text fields as BM25, and the model truncates at 512 tokens. Vectors are L2-normalized, and search is brute-force cosine with numpy. 48,862 × 384 is small, so I didn't add FAISS.
-13. **Saved vectors are tied to the catalog.** `DenseRetriever.index` loads `data/dense_bge-small-en-v1.5.npz` and raises if its product IDs differ from the catalog's, which means rerun `build_index.py`. If the file is missing, it embeds and saves. The vectors path is fixed at `data/...`; `evaluate.py --data-dir` doesn't move it.
+13. **Saved vectors are tied to the catalog and never rebuilt by accident.** `DenseRetriever.index` loads `data/dense_bge-small-en-v1.5.npz`. If the file is missing it raises `FileNotFoundError`; if its product IDs differ from the catalog's it raises `ValueError`. Both messages say to run `build_index.py`. Only `build_index.py` passes `allow_build=True`, which embeds and saves instead. The vectors path is fixed at `data/...`; `evaluate.py --data-dir` doesn't move it.
 14. **Hybrid:** RRF with k=60, scoring each product as the sum of `1/(60 + rank)`. Each retriever contributes its top 100, or k if larger. Ties keep first-appearance order. In the re-ranking setting, both retrievers score only the candidates.
-15. **Cross-encoder:** `cross-encoder/ms-marco-MiniLM-L-6-v2` through sentence-transformers on CPU. I chose L-6, the cheapest MS MARCO MiniLM. The ESCI baseline used L-12, which would be about 2× slower. It reads the same text fields as the retrievers and re-orders the top 50 hybrid hits; any deeper hits keep hybrid order. In the re-ranking setting it re-orders all of a query's ~20 candidates.
-16. **Pipeline configs** look like `{"retriever": ..., "reranker": ..., "rerank_depth": ...}`, with unknown keys or names raising `ValueError`. Hybrid is always BM25 + dense. Swapping a stage is a config change.
+15. **Cross-encoder:** `cross-encoder/ms-marco-MiniLM-L-6-v2` through sentence-transformers on CPU. I chose L-6, the cheapest MS MARCO MiniLM. The ESCI baseline used L-12, which would be about 2× slower. It reads the same text fields as the retrievers. Pairs are truncated at `max_length=256` tokens; the model allows 512, and the results before 2026-10-25 used 512. `hybrid+cross_encoder` re-orders the top 50 hybrid hits, and `hybrid+cross_encoder_fast` re-orders the top 20; any deeper hits keep hybrid order. In the re-ranking setting both re-order all of a query's ~20 candidates.
+16. **Pipeline configs** look like `{"retriever": ..., "intent": ..., "reranker": ..., "rerank_depth": ...}`, with unknown keys or names raising `ValueError`. Hybrid is always BM25 + dense. Swapping a stage is a config change.
 17. **Untested on purpose:** `FastEmbedEncoder` and `load_cross_encoder` aren't unit-tested, because they download models. Every class that uses them takes an injectable encoder or scorer, and tests pass fakes. The real models were exercised by `build_index.py` and the evaluation run.
 18. **Model caches:** fastembed keeps bge-small under the system temp dir (`$TMPDIR/fastembed_cache`), which macOS may clear; it re-downloads in under a minute. The cross-encoder is in `~/.cache/huggingface`.
-19. Nothing touches the LLM, GCP or the API.
+19. **CLAUDE.md now lives in the repo root**, copied from the brief in `~/Downloads`, which I left unchanged. Besides Python 3.12 and the `PYTHONPATH=src` commands, I changed its gains rule to match the official-gains headline, because it would otherwise contradict step 13.
+
+### LLM layer
+
+20. **Settings** come from `.env`; `.env.example` holds placeholders. Project, location (`global`), model names and USD prices per 1M tokens all come from there, and nothing is hardcoded. Auth is ADC. `llm/client.py` has its own 10-line `.env` reader rather than adding python-dotenv.
+21. **One wrapper for every call** (`LLMClient.generate`):
+    - Responses are cached in `data/llm_cache.sqlite`, keyed by sha256 of (model, system prompt, schema, prompt).
+    - Every call is logged: to the `shopsense.llm` logger, and to a `calls` table with tokens, latency, list-price cost and billed cost. Cache hits are billed at $0.
+    - Retries back off exponentially on any exception.
+    - The client is thread-safe.
+22. **Thinking is off** (`thinking_budget=0`) and temperature is 0. In the preflight, `gemini-3.8-flash` spent 98 thinking tokens, billed as output, just to say "ok". `thinking_level="MINIMAL"` is rejected with a 400 by that model. Even at temperature 0, it doesn't return the same ranking twice for the same prompt. The cache makes reruns repeatable.
+23. **The $3 cap** is the sum of `billed_usd` in the call log, across all runs. Once it's reached, `generate` raises `BudgetExceeded`, a separate error that fallbacks don't catch, before making any new call. `evaluate.py` then stops the LLM pipelines and prints what finished. With 8 queries in flight it can overshoot by those 8 calls (about $0.02).
+24. **Query intent** uses `gemini-3.5-flash-lite` with a JSON response schema: `{product_type, brand, color, attributes, exclusions}`. It has a 15 s timeout and 2 retries. Answers are lowercased, deduped and validated. Any failure gives a neutral intent: the query as `product_type` and nothing else. The prompt says brand means the product's own brand. That fixed a real mistake: on the first try, "iphone 14 case" got brand "apple".
+25. **The intent stage** (in `intent+hybrid+llm`) runs on the hybrid hits before reranking:
+    - It **drops** hits whose *title* mentions an exclusion as whole words. I match the title only, because bullet points often name things in passing ("not compatible with…").
+    - It **boosts** by a stable sort on the number of brand and color matches (0–2). Brand matches the brand field or title; color matches the color field or title.
+    - The retriever still gets the raw query.
+26. **The LLM reranker** (`rerank/llm.py`, `gemini-3.8-flash`) is listwise:
+    - One call per query covers the top 20 hybrid hits. Each product is numbered and cut to 300 characters, title first, and the answer is `{"ranking": [...]}` under a schema. The system prompt spells out the ESCI E/S/C/I definitions and says to respect exclusions.
+    - Numbers the model leaves out keep hybrid order. Out-of-range or repeated numbers are ignored.
+    - Timeout is 60 s with 1 retry. Sequential calls took 20–40 s, so 20 s would have timed out most of them.
+    - On timeout, error or an unusable answer, the cross-encoder (max_length 256) orders the same 20 hits, which is exactly `hybrid+cross_encoder_fast`. The query is recorded in `fallback_queries`.
+27. **The LLM subset** is 200 eval queries, `data.llm_eval_ids`: drawn from the 500 eval IDs with the sample's seed, so it's fixed for a given `eval_query_ids.json`. It isn't written to the JSON file, because it's derived from it. Non-LLM pipelines run on all 500 queries, and their LLM-subset rows are the same runs restricted to the 200.
+28. **Concurrency:** LLM pipelines run 8 queries at a time (`--llm-workers`), so the 200 × 2 settings × 2 pipelines finish in about 1.5 h, not about 5 h. Their latency is per query, measured under that load. Non-LLM pipelines run one query at a time, before any LLM work starts.
+29. **Cost per 1K queries** is at list price, counting cache hits as if paid. That's what serving would cost. `intent+hybrid+llm` reuses `hybrid+llm`'s cached rerank answer whenever its intent changes nothing, so its real bill is lower than its listed cost.
+30. **Slices** (on the 200 subset):
+    - short: ≤ 2 words.
+    - long: ≥ 6 words.
+    - brand: the query names, as whole words, the brand of one of its Exact products, ignoring generic brands.
+    - negation: no / not / without / non / except / excluding / free, or an X-free / non-X word.
+31. **Regressions** compare per-query NDCG@10 (official gains, full catalog) against `hybrid+cross_encoder_fast`.
+32. **Untested on purpose:** the real Vertex calls. `genai_backend` is tested against a faked `genai.Client` that checks the request config. Everything else uses fake clients. The real API was exercised by the preflight, two spot checks of intent and rerank, an 8-query smoke test and the evaluation run.
+33. Nothing touches GCP beyond Vertex AI calls, and there is no API yet.
 
 ## What failed or needs your attention
 
@@ -80,4 +202,5 @@ None of these numbers are comparable to the esci-data README's 0.83 baseline, be
   ```
 - **The commit `b2dcec8` (download script) imports `shopsense.data`, which only lands in the next commit.** The data sampling had to happen before the product download. Every commit from `610a0bc` on runs.
 - **Dependencies:** sentence-transformers 6 needs torch ≥ 2.6, but Anaconda has 2.3.1, and its torchvision and torchaudio clashed with a newer torch. So `.venv` was rebuilt as an isolated venv: torch 2.14.1, numpy 2.5.4, pyarrow 26, fastembed 0.9, sentence-transformers 6.2. That uses about 1.4 GB.
+- **The rerank model is slow:** 20–40 s per 20-product call when sequential, and about 54 s with 8 in flight (the 8-query smoke test). The answer is only about 60 tokens, so most of the time is queueing or decoding on the server, not output length. That's why the timeout is 60 s and the evaluation runs queries concurrently.
 - **The network is slow and flaky here.** The first full re-download, which streamed range requests, timed out after 100 minutes at 1.22M of 1.81M rows. The resumable version finished in about 2 hours with 4 read timeouts, all recovered.
