@@ -175,3 +175,30 @@ def test_make_client_reads_roles_from_env(monkeypatch, tmp_path):
     }
     llm = llm_client.make_client("intent", env, cache_path=tmp_path / "c.sqlite")
     assert llm.model == ModelConfig("lite", 0.3, 2.5)
+
+
+def test_client_can_be_shared_between_threads(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    backend = FakeBackend()
+    llm = make(tmp_path, backend)
+    with ThreadPoolExecutor(8) as pool:
+        texts = list(pool.map(lambda i: llm.generate(f"p{i % 20}").text, range(100)))
+    assert texts == [f"echo: p{i % 20}" for i in range(100)]
+    assert llm.spent_usd() == pytest.approx(0.0002 * len(backend.calls))
+
+
+def test_usage_since_counts_calls_and_cache_hits(tmp_path):
+    import time
+
+    llm = make(tmp_path, FakeBackend())
+    llm.generate("old")
+    start = time.time()
+    llm.generate("a")
+    llm.generate("a")
+    assert llm.usage_since(start) == {
+        "calls": 2,
+        "cached": 1,
+        "cost_usd": pytest.approx(0.0004),
+        "billed_usd": pytest.approx(0.0002),
+    }

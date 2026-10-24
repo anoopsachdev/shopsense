@@ -105,3 +105,17 @@ def test_load_queries(con):
 
 def test_load_labels(con):
     assert data.load_labels(con, [1, 3]) == {1: {"p1": "E", "p2": "I"}, 3: {"p4": "C"}}
+
+
+def test_llm_eval_ids_is_a_fixed_subset_of_eval_ids():
+    sample = data.QuerySample(seed=5, eval_ids=list(range(100, 150)), distractor_ids=[1])
+    subset = data.llm_eval_ids(sample, n=10)
+    assert len(subset) == 10 and set(subset) <= set(sample.eval_ids)
+    assert subset == sorted(subset) == data.llm_eval_ids(sample, n=10)
+    other_seed = data.QuerySample(seed=6, eval_ids=sample.eval_ids, distractor_ids=[1])
+    assert data.llm_eval_ids(other_seed, n=10) != subset
+
+
+def test_llm_eval_ids_returns_everything_when_small():
+    sample = data.QuerySample(seed=5, eval_ids=[3, 1], distractor_ids=[])
+    assert data.llm_eval_ids(sample, n=10) == [3, 1]

@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -153,7 +154,12 @@ def cache_key(model: str, prompt: str, system: str | None, schema: Mapping | Non
 
 
 class LLMClient:
-    """Cached, logged, budgeted generate() calls to one model."""
+    """Cached, logged, budgeted generate() calls to one model.
+
+    Safe to share between threads: the SQLite connection is guarded by a lock and model
+    calls run outside it. With several threads, spend can pass the budget by at most
+    the calls already in flight.
+    """
 
     def __init__(
         self,
@@ -171,8 +177,9 @@ class LLMClient:
         self.max_retries = max_retries
         self.budget_usd = budget_usd
         self._sleep = sleep
+        self._lock = threading.Lock()
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(cache_path)
+        self._db = sqlite3.connect(cache_path, check_same_thread=False)
         self._db.executescript(
             """
             CREATE TABLE IF NOT EXISTS responses (
@@ -188,7 +195,20 @@ class LLMClient:
 
     def spent_usd(self) -> float:
         """Total billed spend logged in this cache file, across all models and runs."""
-        return self._db.execute("SELECT COALESCE(SUM(billed_usd), 0) FROM calls").fetchone()[0]
+        with self._lock:
+            row = self._db.execute("SELECT COALESCE(SUM(billed_usd), 0) FROM calls").fetchone()
+        return row[0]
+
+    def usage_since(self, since_ts: float) -> dict[str, float]:
+        """Calls, cache hits, list-price cost and billed spend logged since `since_ts`
+        (a time.time() value), across all models sharing this cache file."""
+        with self._lock:
+            calls, cached, cost, billed = self._db.execute(
+                "SELECT COUNT(*), COALESCE(SUM(cached), 0), COALESCE(SUM(cost_usd), 0), "
+                "COALESCE(SUM(billed_usd), 0) FROM calls WHERE ts >= ?",
+                [since_ts],
+            ).fetchone()
+        return {"calls": calls, "cached": cached, "cost_usd": cost, "billed_usd": billed}
 
     def generate(
         self,
@@ -202,9 +222,10 @@ class LLMClient:
         and LLMError if the call still fails after `max_retries` retries.
         """
         key = cache_key(self.model.name, prompt, system, response_schema)
-        row = self._db.execute(
-            "SELECT text, input_tokens, output_tokens FROM responses WHERE key = ?", [key]
-        ).fetchone()
+        with self._lock:
+            row = self._db.execute(
+                "SELECT text, input_tokens, output_tokens FROM responses WHERE key = ?", [key]
+            ).fetchone()
         if row is not None:
             text, input_tokens, output_tokens = row
             return self._log(key, text, input_tokens, output_tokens, latency_s=0.0, cached=True)
@@ -217,11 +238,12 @@ class LLMClient:
         start = time.perf_counter()
         response = self._call_with_retries(prompt, system, response_schema)
         latency_s = time.perf_counter() - start
-        self._db.execute(
-            "INSERT OR REPLACE INTO responses VALUES (?, ?, ?, ?, ?, ?)",
-            [key, self.model.name, response.text, response.input_tokens,
-             response.output_tokens, latency_s],
-        )
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO responses VALUES (?, ?, ?, ?, ?, ?)",
+                [key, self.model.name, response.text, response.input_tokens,
+                 response.output_tokens, latency_s],
+            )
         return self._log(
             key, response.text, response.input_tokens, response.output_tokens, latency_s, False
         )
@@ -246,12 +268,13 @@ class LLMClient:
     ) -> LLMResponse:
         cost = self.model.cost(input_tokens, output_tokens)
         billed = 0.0 if cached else cost
-        self._db.execute(
-            "INSERT INTO calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [time.time(), self.model.name, key, int(cached), input_tokens, output_tokens,
-             latency_s, cost, billed],
-        )
-        self._db.commit()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [time.time(), self.model.name, key, int(cached), input_tokens, output_tokens,
+                 latency_s, cost, billed],
+            )
+            self._db.commit()
         logger.info(
             "%s cached=%s in=%d out=%d latency=%.2fs cost=$%.6f",
             self.model.name, cached, input_tokens, output_tokens, latency_s, cost,

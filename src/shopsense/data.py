@@ -25,6 +25,7 @@ EVAL_QUERY_IDS_FILE = "eval_query_ids.json"
 DEFAULT_SEED = 42
 NUM_EVAL_QUERIES = 500
 NUM_DISTRACTOR_QUERIES = 2_000
+NUM_LLM_EVAL_QUERIES = 200
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,17 @@ def sample_queries(
     eval_ids = sorted(rng.sample(query_ids_in_split(con, "test"), num_eval))
     distractor_ids = sorted(rng.sample(query_ids_in_split(con, "train"), num_distractors))
     return QuerySample(seed=seed, eval_ids=eval_ids, distractor_ids=distractor_ids)
+
+
+def llm_eval_ids(sample: QuerySample, n: int = NUM_LLM_EVAL_QUERIES) -> list[int]:
+    """The fixed subset of eval queries that LLM pipelines run on (cost is per query).
+
+    Drawn from the eval IDs with the sample's own seed, so it never changes for a given
+    eval_query_ids.json. Returns all eval IDs if there are n or fewer.
+    """
+    if len(sample.eval_ids) <= n:
+        return list(sample.eval_ids)
+    return sorted(random.Random(sample.seed).sample(sample.eval_ids, n))
 
 
 def save_query_sample(sample: QuerySample, path: Path) -> None:
