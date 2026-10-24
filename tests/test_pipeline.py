@@ -109,7 +109,13 @@ def test_build_pipeline_rejects_bad_configs(config, message):
 
 def test_named_pipelines_build_with_the_real_stages():
     # Building is cheap: models load lazily, on first index or search.
-    assert sorted(PIPELINES) == ["bm25", "dense", "hybrid", "hybrid+cross_encoder"]
+    assert list(PIPELINES) == [
+        "bm25",
+        "dense",
+        "hybrid",
+        "hybrid+cross_encoder",
+        "hybrid+cross_encoder_fast",
+    ]
     assert isinstance(get_pipeline("bm25").retriever, BM25Retriever)
     assert isinstance(get_pipeline("dense").retriever, DenseRetriever)
     hybrid = get_pipeline("hybrid").retriever
@@ -119,6 +125,10 @@ def test_named_pipelines_build_with_the_real_stages():
     assert isinstance(reranked, Pipeline)
     assert isinstance(reranked.reranker, CrossEncoderReranker)
     assert reranked.rerank_depth == 50
+    fast = get_pipeline("hybrid+cross_encoder_fast")
+    assert isinstance(fast.retriever, HybridRetriever)
+    assert isinstance(fast.reranker, CrossEncoderReranker)
+    assert fast.rerank_depth == 20
 
 
 def test_get_pipeline_rejects_unknown_name():

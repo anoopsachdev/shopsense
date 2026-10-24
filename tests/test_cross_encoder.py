@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 
+from shopsense.rerank import cross_encoder
 from shopsense.rerank.cross_encoder import CrossEncoderReranker
 from shopsense.retrieval.base import Hit
 
@@ -46,3 +47,18 @@ def test_rerank_scores_product_text_with_all_fields():
 
 def test_rerank_of_no_hits_does_not_load_a_model():
     assert CrossEncoderReranker().rerank("q", []) == []
+
+
+def test_max_length_defaults_to_256_and_reaches_the_loader(monkeypatch):
+    loaded = []
+
+    def fake_loader(model_name, max_length):
+        loaded.append((model_name, max_length))
+        return word_overlap_scorer
+
+    monkeypatch.setattr(cross_encoder, "load_cross_encoder", fake_loader)
+    cases = [(CrossEncoderReranker(), 256), (CrossEncoderReranker(max_length=128), 128)]
+    for reranker, expected in cases:
+        reranker.index(CATALOG)
+        reranker.rerank("shoes", [Hit("p1", 0.0)])
+        assert loaded[-1] == (cross_encoder.DEFAULT_MODEL, expected)

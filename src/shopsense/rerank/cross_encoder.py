@@ -11,16 +11,26 @@ from shopsense.rerank.base import Reranker
 from shopsense.retrieval.base import Hit, catalog_texts
 
 DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+# Tokens per (query, product text) pair. The model allows 512; 256 roughly halves the
+# cost per pair and still covers the title, brand, color and the start of the bullets.
+DEFAULT_MAX_LENGTH = 256
 
 # Scores (query, product text) pairs; higher means more relevant.
 PairScorer = Callable[[list[tuple[str, str]]], Sequence[float]]
 
 
-def load_cross_encoder(model_name: str = DEFAULT_MODEL, batch_size: int = 32) -> PairScorer:
-    """Load a sentence-transformers CrossEncoder on CPU and return its scoring function."""
+def load_cross_encoder(
+    model_name: str = DEFAULT_MODEL,
+    max_length: int = DEFAULT_MAX_LENGTH,
+    batch_size: int = 32,
+) -> PairScorer:
+    """Load a sentence-transformers CrossEncoder on CPU and return its scoring function.
+
+    Pairs longer than `max_length` tokens are truncated.
+    """
     from sentence_transformers import CrossEncoder
 
-    model = CrossEncoder(model_name, device="cpu")
+    model = CrossEncoder(model_name, device="cpu", max_length=max_length)
     return lambda pairs: model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
 
 
@@ -28,9 +38,13 @@ class CrossEncoderReranker(Reranker):
     """Scores each (query, product text) pair jointly and sorts by that score."""
 
     def __init__(
-        self, scorer: PairScorer | None = None, model_name: str = DEFAULT_MODEL
+        self,
+        scorer: PairScorer | None = None,
+        model_name: str = DEFAULT_MODEL,
+        max_length: int = DEFAULT_MAX_LENGTH,
     ) -> None:
         self.model_name = model_name
+        self.max_length = max_length
         self._scorer = scorer
         self._texts: dict[str, str] = {}
 
@@ -43,7 +57,7 @@ class CrossEncoderReranker(Reranker):
         if not hits:
             return []
         if self._scorer is None:
-            self._scorer = load_cross_encoder(self.model_name)
+            self._scorer = load_cross_encoder(self.model_name, self.max_length)
         pairs = [(query, self._texts[hit.product_id]) for hit in hits]
         scores = np.asarray(self._scorer(pairs), dtype=float)
         order = np.argsort(-scores, kind="stable")

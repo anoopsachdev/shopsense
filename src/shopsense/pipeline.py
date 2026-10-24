@@ -22,6 +22,7 @@ from shopsense.retrieval.dense import DEFAULT_VECTORS_PATH, DenseRetriever
 from shopsense.retrieval.hybrid import HybridRetriever
 
 DEFAULT_RERANK_DEPTH = 50
+FAST_RERANK_DEPTH = 20
 
 RETRIEVERS: dict[str, Callable[[], Retriever]] = {
     "bm25": BM25Retriever,
@@ -43,6 +44,12 @@ PIPELINES: dict[str, dict[str, Any]] = {
         "retriever": "hybrid",
         "reranker": "cross_encoder",
         "rerank_depth": DEFAULT_RERANK_DEPTH,
+    },
+    # Same stages, but the cross-encoder only re-orders the top 20: ~2.5x fewer pairs.
+    "hybrid+cross_encoder_fast": {
+        "retriever": "hybrid",
+        "reranker": "cross_encoder",
+        "rerank_depth": FAST_RERANK_DEPTH,
     },
 }
 
