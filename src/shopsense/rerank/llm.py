@@ -101,8 +101,12 @@ class LLMReranker(Reranker):
 
         BudgetExceeded is not caught: it stops the run.
         """
+        return self.rerank_with_status(query, hits)[0]
+
+    def rerank_with_status(self, query: str, hits: Sequence[Hit]) -> tuple[list[Hit], bool]:
+        """`rerank`, plus whether this call fell back to the fallback reranker."""
         if not hits:
-            return []
+            return [], False
         prompt = build_prompt(query, [self._texts[hit.product_id] for hit in hits])
         cost = 0.0
         try:
@@ -111,10 +115,11 @@ class LLMReranker(Reranker):
             order = parse_ranking(response.text, len(hits))
         except (LLMError, ValueError):
             self._record(cost, fell_back_on=query)
-            return self.fallback.rerank(query, hits)
+            return self.fallback.rerank(query, hits), True
         self._record(cost)
         n = len(hits)
-        return [Hit(hits[i].product_id, float(n - rank)) for rank, i in enumerate(order)]
+        reranked = [Hit(hits[i].product_id, float(n - rank)) for rank, i in enumerate(order)]
+        return reranked, False
 
     def _record(self, cost: float, fell_back_on: str | None = None) -> None:
         with self._lock:

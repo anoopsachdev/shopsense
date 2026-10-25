@@ -41,3 +41,25 @@ def test_build_dense_index_embeds_only_the_catalog(tmp_path):
     assert ids == ["p1", "p2"]
     assert vectors.shape == (2, 4)
     assert seconds >= 0
+
+
+def test_export_catalog_writes_only_catalog_products(tmp_path):
+    pd.DataFrame(
+        {
+            "query_id": [1, 2, 3],
+            "query": ["a", "b", "c"],
+            "product_id": ["p1", "p2", "p3"],
+            "esci_label": ["E", "E", "E"],
+            "split": ["test", "train", "train"],
+        }
+    ).to_parquet(tmp_path / "examples.parquet")
+    pd.DataFrame({"product_id": ["p1", "p2", "p3"], "product_title": ["x", "y", "z"]}).to_parquet(
+        tmp_path / "products.parquet"
+    )
+    data.save_query_sample(
+        data.QuerySample(seed=0, eval_ids=[1], distractor_ids=[3]),
+        tmp_path / data.EVAL_QUERY_IDS_FILE,
+    )
+    catalog = build_index.export_catalog(tmp_path)
+    saved = pd.read_parquet(tmp_path / data.CATALOG_FILE)
+    assert saved["product_id"].tolist() == catalog["product_id"].tolist() == ["p1", "p3"]

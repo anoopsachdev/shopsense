@@ -206,7 +206,16 @@ Neither model returned "not found", so `GOOGLE_CLOUD_LOCATION` stays `global`.
     - negation: no / not / without / non / except / excluding / free, or an X-free / non-X word.
 31. **Regressions** compare per-query NDCG@10 (official gains, full catalog) against `hybrid+cross_encoder_fast`.
 32. **Untested on purpose:** the real Vertex calls. `genai_backend` is tested against a faked `genai.Client` that checks the request config. Everything else uses fake clients. The real API was exercised by the preflight, two spot checks of intent and rerank, an 8-query smoke test and the evaluation run.
-33. Nothing touches GCP beyond Vertex AI calls, and there is no API yet.
+33. Nothing touches GCP beyond Vertex AI calls. Nothing is deployed and no cloud resources were created.
+
+### API
+
+34. **`src/shopsense/api.py`** (FastAPI, Pydantic models) serves `GET /search?q=&pipeline=&k=`, `GET /pipelines` and `GET /health`. `/search` returns the results (rank, ID, title, brand, color, score), the parsed intent, which is set only for `intent+hybrid+llm`, the latency, and a `fell_back` flag for this request. Defaults are `pipeline=hybrid+cross_encoder_fast` and `k=10`; `k` runs 1–50 and `q` 1–200 characters, with anything else returning 422. An unknown pipeline returns 400, an unavailable one 503, and a reached LLM budget 503.
+35. **Loading once:** at startup the API reads `data/catalog.parquet`, written by `build_index.py --catalog-only` from the same sample. It builds every pipeline from **shared stages** (`build_shared_pipelines`): one BM25 index, one set of vectors, one cross-encoder that is also the LLM fallback, and one LLM client per role. Indexing the same catalog object twice is a no-op. One warm-up search per non-LLM pipeline loads the models before the first request. The dense stage runs with `allow_build=False`, so missing vectors stop startup with the `build_index.py` message (tested). The catalog is never embedded.
+36. **LLM availability:** LLM pipelines are listed as unavailable, with the reason, when `.env` or the environment lacks the Vertex settings, or when building their clients fails. The other pipelines still serve.
+37. **Rate limit:** an in-memory sliding window allows `SHOPSENSE_LLM_RATE_PER_MIN` (default 10) LLM searches per minute per client IP. The IP is the first `X-Forwarded-For` entry, which Cloud Run sets, otherwise the socket peer. Over the limit it returns 429 with `Retry-After: 60`. The window is per process, so two Cloud Run instances each allow 10. `X-Forwarded-For` can be spoofed, so this is a guard against accidents, not a security boundary. Non-LLM pipelines aren't limited.
+38. **Per-request intent and fallback** come from `Pipeline.search_details`, which returns `SearchDetails(hits, intent, fell_back)`, and `LLMReranker.rerank_with_status`. No shared "last call" state, so concurrent requests can't mix them up.
+39. **Run locally:** `PYTHONPATH=src uvicorn shopsense.api:app --port 8080`, with all 7 pipelines available. The resident set was **~950 MB right after startup** and settled around 640 MB after a few searches. The default pipeline answered in about 1.1 s, BM25 in 58 ms, and `intent+hybrid+llm` in 8.4 s. Missing or bad parameters returned 422, and an unknown pipeline 400.
 
 ## What failed or needs your attention
 

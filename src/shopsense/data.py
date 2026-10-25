@@ -22,6 +22,7 @@ import pandas as pd
 
 DATA_DIR = Path("data")
 EVAL_QUERY_IDS_FILE = "eval_query_ids.json"
+CATALOG_FILE = "catalog.parquet"
 DEFAULT_SEED = 42
 NUM_EVAL_QUERIES = 500
 NUM_DISTRACTOR_QUERIES = 2_000

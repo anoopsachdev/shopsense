@@ -114,3 +114,11 @@ def test_default_retriever_does_not_build():
 def test_search_before_index_raises():
     with pytest.raises(RuntimeError):
         DenseRetriever(encoder=FakeEncoder()).search("shoes", k=1)
+
+
+def test_indexing_the_same_catalog_again_is_a_no_op():
+    encoder = FakeEncoder()
+    dense = DenseRetriever(encoder=encoder, allow_build=True)
+    dense.index(CATALOG)
+    dense.index(CATALOG)
+    assert encoder.document_calls == 1

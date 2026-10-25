@@ -156,6 +156,10 @@ class IntentBooster:
         self.extractor = extractor
         self._fields: dict[str, tuple[str, str, str]] = {}
 
+    def extract(self, query: str) -> QueryIntent:
+        """The query's intent (see QueryIntentExtractor.extract)."""
+        return self.extractor.extract(query)
+
     @property
     def stats(self) -> dict[str, float]:
         """The extractor's call, failure and cost counters."""
@@ -179,9 +183,14 @@ class IntentBooster:
             )
         )
 
-    def apply(self, query: str, hits: Sequence[Hit]) -> list[Hit]:
-        """Hits without excluded products, brand/color matches first."""
-        intent = self.extractor.extract(query)
+    def apply(
+        self, query: str, hits: Sequence[Hit], intent: QueryIntent | None = None
+    ) -> list[Hit]:
+        """Hits without excluded products, brand/color matches first.
+
+        Extracts the query's intent unless `intent` is given.
+        """
+        intent = self.extractor.extract(query) if intent is None else intent
 
         def excluded(hit: Hit) -> bool:
             title = self._fields[hit.product_id][0]

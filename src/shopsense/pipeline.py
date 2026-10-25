@@ -10,12 +10,13 @@ A config names its stages, so swapping a stage is a config change:
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
 
 from shopsense.llm import client as llm_client
-from shopsense.llm.query_intent import IntentBooster, QueryIntentExtractor
+from shopsense.llm.query_intent import IntentBooster, QueryIntent, QueryIntentExtractor
 from shopsense.rerank.base import Reranker
 from shopsense.rerank.cross_encoder import CrossEncoderReranker
 from shopsense.rerank.llm import LLMReranker
@@ -85,6 +86,18 @@ PIPELINES: dict[str, dict[str, Any]] = {
 CONFIG_KEYS = {"retriever", "intent", "reranker", "rerank_depth"}
 
 
+@dataclass(frozen=True)
+class SearchDetails:
+    """One search's hits, its parsed intent and whether the LLM reranker fell back.
+
+    `intent` is None unless the pipeline has an intent stage.
+    """
+
+    hits: list[Hit]
+    intent: QueryIntent | None = None
+    fell_back: bool = False
+
+
 class Pipeline(Retriever):
     """A retriever, an optional intent stage over its hits, and an optional reranker
     over the top `rerank_depth` hits.
@@ -144,15 +157,27 @@ class Pipeline(Retriever):
         reranker, the top `rerank_depth` hits are then re-ordered by it and any deeper
         hits follow (keeping their earlier scores).
         """
+        return self.search_details(query, k, candidate_ids).hits
+
+    def search_details(
+        self, query: str, k: int, candidate_ids: Sequence[str] | None = None
+    ) -> SearchDetails:
+        """`search`, plus this query's parsed intent and LLM fallback flag."""
         if self.reranker is None and self.intent is None:
-            return self.retriever.search(query, k, candidate_ids)
+            return SearchDetails(self.retriever.search(query, k, candidate_ids))
         hits = self.retriever.search(query, max(k, self.rerank_depth), candidate_ids)
+        intent = None
         if self.intent is not None:
-            hits = self.intent.apply(query, hits)
+            intent = self.intent.extract(query)
+            hits = self.intent.apply(query, hits, intent)
         if self.reranker is None:
-            return hits[:k]
-        reranked = self.reranker.rerank(query, hits[: self.rerank_depth])
-        return (reranked + hits[self.rerank_depth :])[:k]
+            return SearchDetails(hits[:k], intent)
+        top = hits[: self.rerank_depth]
+        if hasattr(self.reranker, "rerank_with_status"):
+            reranked, fell_back = self.reranker.rerank_with_status(query, top)
+        else:
+            reranked, fell_back = self.reranker.rerank(query, top), False
+        return SearchDetails((reranked + hits[self.rerank_depth :])[:k], intent, fell_back)
 
 
 def build_pipeline(
@@ -181,6 +206,47 @@ def build_pipeline(
 def get_pipeline(name: str) -> Pipeline:
     """Build one of the named pipelines in `PIPELINES`."""
     return build_pipeline(_lookup(PIPELINES, name, "pipeline"))
+
+
+def build_shared_pipelines(names: Sequence[str]) -> dict[str, Pipeline]:
+    """Build named pipelines that share stage objects, for a server that loads each once.
+
+    They share one BM25 index, one set of dense vectors, one cross-encoder (also the
+    LLM reranker's fallback) and one LLM client per role.
+    """
+    made: dict[str, Any] = {}
+
+    def once(key: str, factory: Callable[[], Any]) -> Callable[[], Any]:
+        def get() -> Any:
+            if key not in made:
+                made[key] = factory()
+            return made[key]
+
+        return get
+
+    bm25 = once("bm25", BM25Retriever)
+    dense = once("dense", lambda: DenseRetriever(vectors_path=DEFAULT_VECTORS_PATH))
+    cross_encoder = once("cross_encoder", CrossEncoderReranker)
+    retrievers = {
+        "bm25": bm25,
+        "dense": dense,
+        "hybrid": once("hybrid", lambda: HybridRetriever([bm25(), dense()])),
+    }
+    rerankers = {
+        "cross_encoder": cross_encoder,
+        "llm": once(
+            "llm_reranker",
+            lambda: LLMReranker(
+                llm_client.make_client("rerank", timeout_s=LLM_RERANK_TIMEOUT_S, max_retries=1),
+                fallback=cross_encoder(),
+            ),
+        ),
+    }
+    intents = {"llm": once("intent", INTENTS["llm"])}
+    return {
+        name: build_pipeline(_lookup(PIPELINES, name, "pipeline"), retrievers, rerankers, intents)
+        for name in names
+    }
 
 
 def _lookup(registry: Mapping[str, Any], name: Any, kind: str) -> Any:

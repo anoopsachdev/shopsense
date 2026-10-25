@@ -24,7 +24,8 @@ def retriever():
 
 
 def test_tokenize_lowercases_and_splits_on_punctuation():
-    assert tokenize("Men's Running-Shoes, size 10!") == ["men", "s", "running", "shoes", "size", "10"]
+    tokens = tokenize("Men's Running-Shoes, size 10!")
+    assert tokens == ["men", "s", "running", "shoes", "size", "10"]
 
 
 def test_product_text_joins_fields_and_skips_missing_and_description():
@@ -67,3 +68,11 @@ def test_search_ties_keep_catalog_order(retriever):
 def test_search_before_index_raises():
     with pytest.raises(RuntimeError):
         BM25Retriever().search("shoes", k=1)
+
+
+def test_indexing_the_same_catalog_again_is_a_no_op(retriever):
+    index_before = retriever._bm25
+    retriever.index(CATALOG)
+    assert retriever._bm25 is index_before
+    retriever.index(CATALOG.copy())
+    assert retriever._bm25 is not index_before

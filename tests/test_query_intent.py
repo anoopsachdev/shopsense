@@ -190,3 +190,11 @@ def test_booster_exposes_and_resets_extractor_stats():
     assert booster.stats == {"calls": 0, "failures": 0, "cost_usd": 0.0}
     booster.reset_stats()
     assert booster.stats == {"calls": 0}
+
+
+def test_booster_extract_and_apply_with_given_intent():
+    booster = IntentBooster(FixedExtractor(QueryIntent("shoes")))
+    booster.index(BOOST_CATALOG)
+    assert booster.extract("q") == QueryIntent("shoes")
+    given = QueryIntent("case", exclusions=("otterbox",))
+    assert [hit.product_id for hit in booster.apply("q", HITS, given)] == ["p1", "p3", "p4", "p5"]

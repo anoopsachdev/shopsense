@@ -4,7 +4,7 @@ LLM-assisted product search on Amazon's [ESCI shopping-queries dataset](https://
 scored against human relevance labels on quality, latency and cost per query.
 
 Status: BM25, dense (bge-small), hybrid (RRF), cross-encoder and Gemini (query intent and listwise reranking)
-pipelines, all scored by one harness. The API is not built yet.
+pipelines, all scored by one harness, and served by a FastAPI app.
 
 ## Results
 
@@ -76,7 +76,26 @@ cp .env.example .env              # only for the LLM pipelines: fill in project,
 
 LLM pipelines call Gemini on Vertex AI with Application Default Credentials (`gcloud auth application-default login`).
 
+## API and web page
+
+```bash
+PYTHONPATH=src python scripts/build_index.py --catalog-only   # data/catalog.parquet, if missing
+PYTHONPATH=src uvicorn shopsense.api:app --port 8080
+```
+
+Then call the API:
+
+- `GET /search?q=red+shoes&pipeline=hybrid+cross_encoder_fast&k=10`: results, the parsed intent (for
+  `intent+hybrid+llm`), latency and whether the LLM reranker fell back to the cross-encoder.
+- `GET /pipelines`: every pipeline, its config and whether it is available.
+- `GET /health`
+
+Indexes and models load once at startup (about 1 GB of RAM); the catalog is never re-embedded. LLM pipelines
+need the `.env` settings and Application Default Credentials, and are rate-limited per IP
+(`SHOPSENSE_LLM_RATE_PER_MIN`, default 10).
+
 ## Commands
 
 - Tests: `pytest -q`
-- Evaluate: `python scripts/evaluate.py --pipelines all` (or e.g. `--pipelines bm25,hybrid`)
+- Evaluate: `PYTHONPATH=src python scripts/evaluate.py --pipelines all` (or e.g. `--pipelines bm25,hybrid`)
+- API: `PYTHONPATH=src uvicorn shopsense.api:app --reload`

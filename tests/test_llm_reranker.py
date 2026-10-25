@@ -137,3 +137,10 @@ def test_stats_are_consistent_across_threads():
     assert reranker.stats["calls"] == 200
     assert reranker.stats["cost_usd"] == pytest.approx(0.4)
 
+
+def test_rerank_with_status_reports_fallback():
+    hits, fell_back = make(error=LLMError("timeout")).rerank_with_status("q", HITS)
+    assert fell_back and [hit.product_id for hit in hits] == ["p3", "p2", "p1"]
+    hits, fell_back = make(text="1,2,3").rerank_with_status("q", HITS)
+    assert not fell_back and [hit.product_id for hit in hits] == ["p1", "p2", "p3"]
+    assert make().rerank_with_status("q", []) == ([], False)

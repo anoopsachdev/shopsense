@@ -22,15 +22,22 @@ class BM25Retriever(Retriever):
 
     def __init__(self) -> None:
         self._bm25: BM25Okapi | None = None
+        self._indexed: pd.DataFrame | None = None
         self._product_ids: list[str] = []
         self._position: dict[str, int] = {}
 
     def index(self, catalog: pd.DataFrame) -> None:
-        """Tokenize each product's text and build the BM25 index."""
+        """Tokenize each product's text and build the BM25 index.
+
+        Indexing the same catalog object again is a no-op, so stages can be shared.
+        """
+        if catalog is self._indexed:
+            return
         self._product_ids = catalog["product_id"].tolist()
         self._position = {pid: i for i, pid in enumerate(self._product_ids)}
         corpus = [tokenize(text) for text in catalog_texts(catalog)]
         self._bm25 = BM25Okapi(corpus)
+        self._indexed = catalog
 
     def search(
         self, query: str, k: int, candidate_ids: Sequence[str] | None = None

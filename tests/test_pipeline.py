@@ -3,7 +3,7 @@ import pytest
 
 from shopsense import pipeline as pipeline_module
 from shopsense.llm.client import LLMResponse
-from shopsense.llm.query_intent import IntentBooster
+from shopsense.llm.query_intent import IntentBooster, QueryIntent
 from shopsense.pipeline import (
     PIPELINES,
     Pipeline,
@@ -68,9 +68,12 @@ class DropA2Intent:
     def reset_stats(self):
         self.stats = {"calls": 0, "failures": 0, "cost_usd": 0.0}
 
-    def apply(self, query, hits):
+    def extract(self, query):
         self.stats["calls"] += 1
         self.stats["cost_usd"] += 0.5
+        return QueryIntent("thing", exclusions=("a2",))
+
+    def apply(self, query, hits, intent=None):
         kept = [hit for hit in hits if hit.product_id != "a2"]
         return sorted(kept, key=lambda hit: hit.product_id != "a4")
 
@@ -196,7 +199,8 @@ def test_llm_stats_sum_intent_and_reranker_and_reset():
 
     pipeline = Pipeline(ListRetriever(), CountingReranker(), 3, DropA2Intent())
     pipeline.search("q", k=3)
-    assert pipeline.llm_stats() == {"calls": 3, "cost_usd": 0.75, "rerank_calls": 2, "fallbacks": 1}
+    expected = {"calls": 3, "cost_usd": 0.75, "rerank_calls": 2, "fallbacks": 1}
+    assert pipeline.llm_stats() == expected
     pipeline.reset_llm_stats()
     assert pipeline.llm_stats() == ZERO_STATS
 
@@ -236,3 +240,44 @@ def test_llm_pipelines_build_with_their_clients(monkeypatch):
 def test_get_pipeline_rejects_unknown_name():
     with pytest.raises(ValueError, match="unknown pipeline"):
         get_pipeline("bm26")
+
+
+class StatusReranker(ReverseReranker):
+    """Reverses hits and reports a fallback, like LLMReranker.rerank_with_status."""
+
+    def rerank_with_status(self, query, hits):
+        return self.rerank(query, hits), True
+
+
+def test_search_details_returns_intent_and_fallback_flag():
+    pipeline = Pipeline(ListRetriever(), StatusReranker(), 3, DropA2Intent())
+    details = pipeline.search_details("q", k=4)
+    # Retrieves a1..a4, the intent drops a2 and moves a4 first, the reranker reverses.
+    assert [hit.product_id for hit in details.hits] == ["a3", "a1", "a4"]
+    assert details.intent == QueryIntent("thing", exclusions=("a2",))
+    assert details.fell_back is True
+    assert pipeline.search("q", k=4) == details.hits
+
+
+def test_search_details_without_llm_stages():
+    details = build({"retriever": "list", "reranker": "reverse"}).search_details("q", k=2)
+    assert details.intent is None and details.fell_back is False
+
+
+def test_shared_pipelines_share_stage_objects(monkeypatch):
+    class FakeClient:
+        def generate(self, prompt, system=None, response_schema=None):
+            return LLMResponse("{}", 0, 0, 0.0, 0.0, 0.0, False)
+
+    monkeypatch.setattr(pipeline_module.llm_client, "make_client", lambda role, **kw: FakeClient())
+    pipelines = pipeline_module.build_shared_pipelines(list(PIPELINES))
+    bm25 = pipelines["bm25"].retriever
+    dense = pipelines["dense"].retriever
+    hybrid = pipelines["hybrid"].retriever
+    assert hybrid.retrievers == [bm25, dense]
+    assert pipelines["hybrid+llm"].retriever is hybrid
+    cross_encoder = pipelines["hybrid+cross_encoder"].reranker
+    assert pipelines["hybrid+cross_encoder_fast"].reranker is cross_encoder
+    assert pipelines["hybrid+llm"].reranker.fallback is cross_encoder
+    assert pipelines["intent+hybrid+llm"].reranker is pipelines["hybrid+llm"].reranker
+    assert pipelines["hybrid+cross_encoder_fast"].rerank_depth == 20

@@ -300,7 +300,8 @@ def format_slices(
     slices: Mapping[str, Sequence[int]],
 ) -> str:
     """Markdown table of mean NDCG@10 per pipeline (rows) and slice (columns)."""
-    header = "| Pipeline | " + " | ".join(f"{s} (n={len(ids)})" for s, ids in slices.items()) + " |"
+    titles = [f"{name} (n={len(ids)})" for name, ids in slices.items()]
+    header = "| Pipeline | " + " | ".join(titles) + " |"
     lines = [header, "|" + "---|" * (len(slices) + 1)]
     for name, run in runs.items():
         per_query = per_query_ndcg(run, labels, gains)
@@ -433,7 +434,10 @@ def main() -> None:
         described = ", ".join(f"{label} {value:g}" for label, value in gains.items())
         tag = " (headline)" if gains is headline else ""
         if plain_names:
-            print(f"\n## All {len(queries)} eval queries. NDCG gains: {gain_name}{tag}: {described}\n")
+            print(
+                f"\n## All {len(queries)} eval queries. NDCG gains: {gain_name}{tag}: "
+                f"{described}\n"
+            )
             print(format_table(score_runs({n: runs[n] for n in plain_names}, labels, gains)))
         if llm_names:
             subset_runs = {

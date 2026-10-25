@@ -88,6 +88,7 @@ class DenseRetriever(Retriever):
         self._product_ids: list[str] = []
         self._position: dict[str, int] = {}
         self._vectors: np.ndarray | None = None
+        self._indexed: pd.DataFrame | None = None
 
     def index(self, catalog: pd.DataFrame) -> None:
         """Load the saved vectors for this catalog.
@@ -95,7 +96,10 @@ class DenseRetriever(Retriever):
         If they are missing or were built for a different catalog, embed the catalog (and
         save, if a path is set) when `allow_build` is True; otherwise raise
         FileNotFoundError (missing) or ValueError (stale), pointing to build_index.py.
+        Indexing the same catalog object again is a no-op, so stages can be shared.
         """
+        if catalog is self._indexed:
+            return
         product_ids = catalog["product_id"].tolist()
         vectors = self._load_saved(product_ids)
         if vectors is None:
@@ -105,6 +109,7 @@ class DenseRetriever(Retriever):
         self._product_ids = product_ids
         self._position = {pid: i for i, pid in enumerate(product_ids)}
         self._vectors = vectors
+        self._indexed = catalog
 
     def _load_saved(self, product_ids: list[str]) -> np.ndarray | None:
         """Saved vectors if they match `product_ids`; None if building is allowed instead."""
