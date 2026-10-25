@@ -76,6 +76,7 @@ def client(llm):
         )
 
     with TestClient(api.create_app(load)) as test_client:
+        assert test_client.app.state.loader.wait(10)
         yield test_client
 
 
@@ -85,7 +86,91 @@ def test_health(client):
         "status": "ok",
         "catalog_products": 3,
         "pipelines": ["bm25", api.DEFAULT_PIPELINE, "intent+hybrid+llm"],
+        "load_seconds": pytest.approx(body["load_seconds"]),
     }
+    assert body["load_seconds"] >= 0
+
+
+def gated_app(gate, load_wait_s=5.0, error=None):
+    """An app whose background load blocks until `gate` is set."""
+
+    def load():
+        gate.wait(10)
+        if error:
+            raise error
+        bm25 = BM25Retriever()
+        pipeline = Pipeline(bm25)
+        pipeline.index(CATALOG)
+        return api.AppState(
+            products=api._product_lookup(CATALOG),
+            pipelines={api.DEFAULT_PIPELINE: pipeline},
+        )
+
+    return api.create_app(load, load_wait_s=load_wait_s)
+
+
+def test_page_pipelines_and_health_answer_while_loading(monkeypatch):
+    import threading
+
+    monkeypatch.setattr(api, "load_env", lambda: {})
+    gate = threading.Event()
+    with TestClient(gated_app(gate)) as client:
+        assert client.get("/").status_code == 200
+        assert client.get("/health").json() == {
+            "status": "loading", "catalog_products": 0, "pipelines": [], "load_seconds": None,
+        }
+        rows = {row["name"]: row for row in client.get("/pipelines").json()}
+        assert rows["bm25"]["available"] is True
+        assert rows["hybrid+llm"]["available"] is False
+        assert "LLM settings missing" in rows["hybrid+llm"]["reason"]
+        gate.set()
+
+
+def test_search_and_health_wait_for_the_load():
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    gate = threading.Event()
+    with TestClient(gated_app(gate)) as client, ThreadPoolExecutor(2) as pool:
+        search = pool.submit(client.get, "/search", params={"q": "red shoes"})
+        ready = pool.submit(client.get, "/health", params={"wait": "true"})
+        assert not search.done()
+        gate.set()
+        assert search.result(timeout=10).json()["results"][0]["product_id"] == "p1"
+        assert ready.result(timeout=10).json()["status"] == "ok"
+
+
+def test_search_is_503_if_still_loading_after_the_wait():
+    import threading
+
+    gate = threading.Event()
+    with TestClient(gated_app(gate, load_wait_s=0.05)) as client:
+        response = client.get("/search", params={"q": "x"})
+        assert response.status_code == 503
+        assert "warming up" in response.json()["detail"]
+        assert response.headers["retry-after"] == "10"
+        gate.set()
+
+
+def test_failed_load_is_reported():
+    import threading
+
+    gate = threading.Event()
+    gate.set()
+    app = gated_app(gate, error=FileNotFoundError("run build_index.py"))
+    with TestClient(app) as client:
+        assert client.app.state.loader.wait(5)
+        for path in ("/health", "/search?q=x"):
+            response = client.get(path)
+            assert response.status_code == 503
+            assert "build_index.py" in response.json()["detail"]
+
+
+def test_background_load_records_state_and_time():
+    loader = api.BackgroundLoad(lambda: "state")
+    loader.start()
+    assert loader.wait(5)
+    assert loader.state == "state" and loader.error is None and loader.seconds >= 0
 
 
 def test_pipelines_lists_every_config_with_availability(client):

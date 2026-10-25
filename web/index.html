@@ -35,6 +35,7 @@
     button:disabled { opacity: 0.6; cursor: wait; }
     .meta { margin: 16px 0 8px; color: var(--muted); font-size: 0.9rem; display: flex; flex-wrap: wrap; gap: 12px; }
     .badge { padding: 1px 8px; border-radius: 999px; background: var(--warn-bg); color: var(--warn); }
+    .note { margin-top: 16px; padding: 10px 12px; border-radius: 6px; background: var(--warn-bg); color: var(--warn); }
     .error { margin-top: 16px; padding: 10px 12px; border-radius: 6px; background: var(--err-bg); color: var(--err); }
     .intent { margin: 8px 0 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); font-size: 0.9rem; }
     .intent dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0 0; }
@@ -61,6 +62,10 @@
     <button id="go" type="submit">Search</button>
   </form>
 
+  <div id="warming" class="note" hidden role="status">
+    Warming up the search engine. The first visit after a quiet spell loads the models, which can take up to a
+    minute; your search will run as soon as it's ready.
+  </div>
   <div id="error" class="error" hidden></div>
   <div id="meta" class="meta" hidden></div>
   <section id="intent" class="intent" hidden aria-label="Parsed intent"></section>
@@ -188,7 +193,27 @@
     }
   }
 
+  // On a cold server the models load in the background. Holding a /health?wait=true
+  // request open keeps the server's CPU allocated (Cloud Run) until loading is done.
+  async function warmUp() {
+    try {
+      const health = await (await fetch("/health")).json();
+      if (health.status === "ok") return;
+      $("warming").hidden = false;
+      const ready = await fetch("/health?wait=true");
+      if (!ready.ok) {
+        const body = await ready.json();
+        showError(`${ready.status}: ${body.detail}`);
+      }
+    } catch (err) {
+      showError("Could not reach the server: " + err.message);
+    } finally {
+      $("warming").hidden = true;
+    }
+  }
+
   $("search-form").addEventListener("submit", search);
+  warmUp();
   loadPipelines().then(() => {
     const q = new URLSearchParams(location.search).get("q");
     if (q) { $("q").value = q; $("search-form").requestSubmit(); }

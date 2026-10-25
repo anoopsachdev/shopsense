@@ -2,13 +2,20 @@
 
     GET /search?q=red+shoes&pipeline=hybrid+cross_encoder_fast&k=10
     GET /pipelines
-    GET /health
+    GET /health[?wait=true]
     GET /            the search page (web/index.html)
 
-At startup it loads data/catalog.parquet and the saved dense vectors, builds every
-pipeline with shared stages (one BM25 index, one cross-encoder, ...), and runs one
-warm-up search per non-LLM pipeline so models are loaded before the first request.
-It never embeds the catalog: missing vectors stop startup with a pointer to
+The server starts listening at once and loads in a background thread: it reads
+data/catalog.parquet and the saved dense vectors, builds every pipeline with shared
+stages (one BM25 index, one cross-encoder, ...), and runs one warm-up search per
+non-LLM pipeline. Meanwhile `/` and `/pipelines` answer immediately, `/health` reports
+"loading", and `/search` (or `/health?wait=true`) waits for the load to finish.
+
+Waiting matters on Cloud Run: with request-based billing an instance only gets CPU
+while a request is in flight, so a waiting request is what lets the background load
+run at full speed. The page and the keep-warm ping both call `/health?wait=true`.
+
+It never embeds the catalog: missing vectors fail the load with a pointer to
 scripts/build_index.py.
 
 Paths are relative to the working directory: data/catalog.parquet and
@@ -48,6 +55,8 @@ logger = logging.getLogger("shopsense.api")
 
 DEFAULT_PIPELINE = "hybrid+cross_encoder_fast"
 MAX_K = 50
+# How long a request waits for the background load; Cloud Run's request timeout is 120 s.
+LOAD_WAIT_S = 100.0
 LLM_ENV_KEYS = ("GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "GEMINI_RERANK_MODEL")
 REPO_WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 WEB_DIR = Path(os.environ.get("SHOPSENSE_WEB_DIR", REPO_WEB_DIR))
@@ -89,9 +98,10 @@ class PipelineInfo(BaseModel):
 
 
 class Health(BaseModel):
-    status: str
+    status: str  # "ok" or "loading"
     catalog_products: int
     pipelines: list[str]
+    load_seconds: float | None = None
 
 
 class RateLimiter:
@@ -127,6 +137,37 @@ class AppState:
     pipelines: dict[str, Pipeline]
     unavailable: dict[str, str] = field(default_factory=dict)
     limiter: RateLimiter = field(default_factory=lambda: RateLimiter(10))
+
+
+class BackgroundLoad:
+    """Runs `load` once in a background thread; requests can wait for it to finish."""
+
+    def __init__(self, load: Callable[[], AppState]) -> None:
+        self._load = load
+        self._done = threading.Event()
+        self.state: AppState | None = None
+        self.error: Exception | None = None
+        self.seconds: float | None = None
+
+    def start(self) -> None:
+        """Begin loading in a daemon thread."""
+        threading.Thread(target=self._run, name="shopsense-load", daemon=True).start()
+
+    def _run(self) -> None:
+        start = time.perf_counter()
+        try:
+            self.state = self._load()
+        except Exception as err:  # reported by /health and /search
+            self.error = err
+            logger.exception("loading failed")
+        finally:
+            self.seconds = time.perf_counter() - start
+            logger.info("load finished in %.1fs", self.seconds)
+            self._done.set()
+
+    def wait(self, timeout_s: float) -> bool:
+        """Wait up to `timeout_s` for the load to finish; True if it has."""
+        return self._done.wait(timeout_s)
 
 
 def llm_unavailable_reason(env: Mapping[str, str]) -> str | None:
@@ -219,36 +260,69 @@ def _intent_model(intent: QueryIntent | None) -> Intent | None:
     )
 
 
-def create_app(load: Callable[[], AppState] = load_state) -> FastAPI:
-    """The app. `load` builds the state at startup (tests pass a fake)."""
+def create_app(
+    load: Callable[[], AppState] = load_state, load_wait_s: float = LOAD_WAIT_S
+) -> FastAPI:
+    """The app. `load` builds the state in the background (tests pass a fake), and
+    requests that need it wait up to `load_wait_s` seconds."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.shop = load()
+        app.state.loader = BackgroundLoad(load)
+        app.state.loader.start()
         yield
 
     app = FastAPI(title="ShopSense", lifespan=lifespan)
 
-    def state(request: Request) -> AppState:
-        return request.app.state.shop
+    def state(request: Request, wait: bool = True) -> AppState | None:
+        """The loaded state; waits for it unless `wait` is False (then None while loading).
+
+        Raises 503 if loading failed, or if it is still running after the wait.
+        """
+        loader: BackgroundLoad = request.app.state.loader
+        if wait and not loader.wait(load_wait_s):
+            raise HTTPException(503, "still warming up; try again shortly", {"Retry-After": "10"})
+        if loader.error is not None:
+            name = type(loader.error).__name__
+            raise HTTPException(503, f"startup failed: {name}: {loader.error}")
+        return loader.state
 
     @app.get("/health", response_model=Health)
-    def health(request: Request) -> Health:
-        shop = state(request)
+    def health(
+        request: Request,
+        wait: bool = Query(False, description="wait for models to finish loading"),
+    ) -> Health:
+        shop = state(request, wait=wait)
+        if shop is None:
+            return Health(status="loading", catalog_products=0, pipelines=[])
         return Health(
-            status="ok", catalog_products=len(shop.products), pipelines=list(shop.pipelines)
+            status="ok",
+            catalog_products=len(shop.products),
+            pipelines=list(shop.pipelines),
+            load_seconds=round(request.app.state.loader.seconds, 1),
         )
 
     @app.get("/pipelines", response_model=list[PipelineInfo])
     def pipelines(request: Request) -> list[PipelineInfo]:
-        shop = state(request)
+        """Never waits: while loading, availability is predicted from the settings."""
+        shop = state(request, wait=False)
+        if shop is None:
+            reason = llm_unavailable_reason(load_env())
+            available = {
+                name: reason is None or not _config_uses_llm(config)
+                for name, config in PIPELINES.items()
+            }
+            unavailable = {name: reason for name, ok in available.items() if not ok}
+        else:
+            available = {name: name in shop.pipelines for name in PIPELINES}
+            unavailable = shop.unavailable
         return [
             PipelineInfo(
                 name=name,
                 config=config,
                 uses_llm=_config_uses_llm(config),
-                available=name in shop.pipelines,
-                reason=shop.unavailable.get(name),
+                available=available[name],
+                reason=unavailable.get(name),
             )
             for name, config in PIPELINES.items()
         ]
