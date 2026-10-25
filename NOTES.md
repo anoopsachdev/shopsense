@@ -147,7 +147,7 @@ I re-timed the 20 first queries of the LLM subset. Both formats got the same top
 | `.env` ignored and not staged | ✅ (`git check-ignore` matches it; nothing staged) |
 | gcloud installed | ✅ Google Cloud SDK 581.0.0 (`/opt/homebrew/bin/gcloud`) |
 | Application Default Credentials | ✅ `~/.config/gcloud/application_default_credentials.json`, type authorized_user |
-| Quota project shopsense-512615 | ✅ ADC `quota_project_id` and `gcloud config` project both match |
+| Quota project matches `GOOGLE_CLOUD_PROJECT` in `.env` | ✅ ADC `quota_project_id` and `gcloud config` project both match |
 | `gemini-3.5-flash-lite` @ global | ✅ answered "ok" (7 in, 1 out) |
 | `gemini-3.8-flash` @ global | ✅ answered "ok" once thinking was off. The first call, capped at 16 output tokens, spent them all on thinking and returned no text. One default-settings call returned a transient 500, which passed on retry. |
 
