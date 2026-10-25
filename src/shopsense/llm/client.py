@@ -215,17 +215,23 @@ class LLMClient:
         prompt: str,
         system: str | None = None,
         response_schema: Mapping[str, Any] | None = None,
+        refresh: bool = False,
     ) -> LLMResponse:
         """Return the model's text for `prompt`, from cache if seen before.
 
-        Raises BudgetExceeded before a new call once the logged spend reaches the budget,
-        and LLMError if the call still fails after `max_retries` retries.
+        `refresh=True` skips the cache lookup and makes a new (logged, budgeted) call,
+        replacing the cached answer; for re-timing a prompt. Raises BudgetExceeded
+        before a new call once the logged spend reaches the budget, and LLMError if the
+        call still fails after `max_retries` retries.
         """
         key = cache_key(self.model.name, prompt, system, response_schema)
-        with self._lock:
-            row = self._db.execute(
-                "SELECT text, input_tokens, output_tokens FROM responses WHERE key = ?", [key]
-            ).fetchone()
+        row = None
+        if not refresh:
+            with self._lock:
+                row = self._db.execute(
+                    "SELECT text, input_tokens, output_tokens FROM responses WHERE key = ?",
+                    [key],
+                ).fetchone()
         if row is not None:
             text, input_tokens, output_tokens = row
             return self._log(key, text, input_tokens, output_tokens, latency_s=0.0, cached=True)

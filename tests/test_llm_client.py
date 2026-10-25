@@ -52,6 +52,7 @@ def test_load_env_reads_file_and_environment_overrides(tmp_path, monkeypatch):
     assert load_env(tmp_path / "missing") == {}
 
 
+
 def test_model_config_from_env():
     env = {
         "GEMINI_RERANK_MODEL": "m",
@@ -202,3 +203,13 @@ def test_usage_since_counts_calls_and_cache_hits(tmp_path):
         "cost_usd": pytest.approx(0.0004),
         "billed_usd": pytest.approx(0.0002),
     }
+
+
+def test_refresh_skips_the_cache_and_replaces_the_answer(tmp_path):
+    backend = FakeBackend()
+    llm = make(tmp_path, backend)
+    llm.generate("hi")
+    refreshed = llm.generate("hi", refresh=True)
+    assert not refreshed.cached and refreshed.billed_usd > 0
+    assert len(backend.calls) == 2
+    assert llm.generate("hi").cached

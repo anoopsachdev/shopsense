@@ -1,9 +1,13 @@
 """Listwise LLM reranking: the rerank model orders all candidates in one call.
 
 The prompt lists the query and up to `len(hits)` products, numbered 1..n and shortened
-to their first `text_chars` characters (title first). The model answers
-{"ranking": [3, 1, 2, ...]} under a response schema. Numbers it leaves out keep their
-retriever order after the ones it ranked.
+to their first `text_chars` characters (title first). The model answers with the
+numbers only, comma-separated: "3,1,2,...". Numbers it leaves out keep their retriever
+order after the ones it ranked.
+
+The answer used to be JSON ({"ranking": [...]} under a response schema). JSON mode
+pretty-printed it one number per line, ~102 output tokens for 20 products against ~50
+for the plain list, so the plain list is used and parsed strictly instead.
 
 If the call times out or errors, or the answer is unusable, the fallback reranker
 (the cross-encoder by default) orders the same hits; the fallback is counted and the
@@ -12,10 +16,9 @@ query recorded. Safe to call from several threads.
 
 from __future__ import annotations
 
-import json
+import re
 import threading
 from collections.abc import Sequence
-from typing import Any
 
 import pandas as pd
 
@@ -26,11 +29,8 @@ from shopsense.retrieval.base import Hit, catalog_texts
 
 DEFAULT_TEXT_CHARS = 300
 
-RANKING_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {"ranking": {"type": "array", "items": {"type": "integer"}}},
-    "required": ["ranking"],
-}
+# The whole answer must be numbers separated by commas (spaces allowed).
+ANSWER_PATTERN = re.compile(r"\s*\d+(?:\s*,\s*\d+)*\s*")
 
 SYSTEM_PROMPT = """You rank products for an e-commerce search query.
 Order the products from most to least relevant:
@@ -40,7 +40,8 @@ Order the products from most to least relevant:
 3. Complement: goes with what was asked for (an accessory or part), but isn't it.
 4. Irrelevant: none of the above.
 Respect what the query excludes ("without", "no", "not").
-Answer with the product numbers, best first, using every number exactly once."""
+Answer with the product numbers only, best first, comma-separated, using every number
+exactly once, e.g. 3,1,2. No other text."""
 
 
 def build_prompt(query: str, texts: Sequence[str]) -> str:
@@ -54,19 +55,12 @@ def parse_ranking(text: str, n: int) -> list[int]:
     """0-based positions in the model's order, then any it left out in input order.
 
     Out-of-range and repeated numbers are ignored. Raises ValueError if the answer
-    isn't {"ranking": [...]} or ranks none of the n products.
+    isn't a comma-separated list of numbers or ranks none of the n products.
     """
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as err:
-        raise ValueError(f"not JSON: {text[:80]!r}") from err
-    if not isinstance(payload, dict) or not isinstance(payload.get("ranking"), list):
-        raise ValueError(f"expected {{'ranking': [...]}}, got {text[:80]!r}")
-    ranked = [
-        number - 1
-        for number in payload["ranking"]
-        if isinstance(number, int) and not isinstance(number, bool) and 1 <= number <= n
-    ]
+    if not ANSWER_PATTERN.fullmatch(text):
+        raise ValueError(f"expected comma-separated numbers, got {text[:80]!r}")
+    numbers = [int(part) for part in text.split(",")]
+    ranked = [number - 1 for number in numbers if 1 <= number <= n]
     ranked = list(dict.fromkeys(ranked))
     if not ranked:
         raise ValueError("ranking names none of the products")
@@ -112,16 +106,15 @@ class LLMReranker(Reranker):
         prompt = build_prompt(query, [self._texts[hit.product_id] for hit in hits])
         cost = 0.0
         try:
-            response = self.client.generate(
-                prompt, system=SYSTEM_PROMPT, response_schema=RANKING_SCHEMA
-            )
+            response = self.client.generate(prompt, system=SYSTEM_PROMPT)
             cost = response.cost_usd
             order = parse_ranking(response.text, len(hits))
         except (LLMError, ValueError):
             self._record(cost, fell_back_on=query)
             return self.fallback.rerank(query, hits)
         self._record(cost)
-        return [Hit(hits[i].product_id, float(len(hits) - rank)) for rank, i in enumerate(order)]
+        n = len(hits)
+        return [Hit(hits[i].product_id, float(n - rank)) for rank, i in enumerate(order)]
 
     def _record(self, cost: float, fell_back_on: str | None = None) -> None:
         with self._lock:

@@ -122,6 +122,22 @@ The 10 worst of the 20 printed for each pipeline (the full lists are in the run 
 2. **The gains come from short and brand queries.** On brand queries the LLM scores 0.80–0.81 against 0.75 for the fast cross-encoder; on short queries, 0.49–0.51 against 0.44. On long queries (6+ words) plain `hybrid+llm` is *worse* than the fast cross-encoder (0.533 vs 0.568). Our 300-character product snippets probably cut off the details those queries ask about.
 3. **Taking "without X" literally scores worse against ESCI labels.** On the 12 negation queries the LLM drops to 0.435, and intent exclusions drop it to 0.372, against 0.472 for the fast cross-encoder. The worst losses are queries like "cemetery without crosses" (0.88 → 0.03) and "1 ear headset without microphone" (0.55 → 0). Annotators often labelled products as Exact even when they include the excluded thing, so removing them is penalized. Overall the intent stage nets only +0.007 NDCG@10, and it costs Recall@50 (0.663 vs 0.680) because of the products it drops. The slice is small (n=12), so treat this as a direction, not a measurement.
 
+## Rerank answer format: before and after (2026-10-25)
+
+The rerank model only ever returned product numbers, but as JSON mode's pretty-printed `{"ranking": [...]}`, one number per line: about 102 output tokens for 20 products. The reranker now asks for the numbers alone, comma-separated (`3,1,2,...`), with no JSON schema. `parse_ranking` accepts only digits and commas, so anything else falls back to the cross-encoder.
+
+I re-timed the 20 first queries of the LLM subset. Both formats got the same top-20 hybrid hits and the production settings (60 s timeout, 1 retry), one call at a time with the cache bypassed (`generate(..., refresh=True)`).
+
+| Format | Answered | Output tokens (median / mean) | Median latency | p90 latency | List cost per call | NDCG@10 |
+|---|---|---|---|---|---|---|
+| Before: `{"ranking": [...]}` JSON | 20/20 | 102 / 99.2 | 15.5 s | 59.8 s | $0.00164 | 0.5807 |
+| After: comma-separated IDs | 19/20 | 50 / 64.4 | 17.5 s | 63.9 s | $0.00148 | 0.5852 |
+
+- NDCG@10 (official gains, full catalog) is over the 19 queries both formats answered. The one miss was a 429 RESOURCE_EXHAUSTED, not a parsing failure.
+- The "after" mean includes one 323-token call. The model occasionally reports thinking tokens even with `thinking_budget=0`.
+- **Output tokens halved, cost per call fell about 10%** (input, about 1,500 tokens, dominates), and **quality held**. **Latency didn't change.** It's set by the server: calls take either about 2 s or close to the timeout, whichever format is used.
+- The re-timing cost $0.064. Total logged LLM spend is now **$0.67 of $3**. I didn't rerun the full evaluation, so the tables above are from the JSON format.
+
 ## LLM preflight (2026-10-25)
 
 | Check | Result |
@@ -175,7 +191,8 @@ Neither model returned "not found", so `GOOGLE_CLOUD_LOCATION` stays `global`.
     - It **boosts** by a stable sort on the number of brand and color matches (0–2). Brand matches the brand field or title; color matches the color field or title.
     - The retriever still gets the raw query.
 26. **The LLM reranker** (`rerank/llm.py`, `gemini-3.8-flash`) is listwise:
-    - One call per query covers the top 20 hybrid hits. Each product is numbered and cut to 300 characters, title first, and the answer is `{"ranking": [...]}` under a schema. The system prompt spells out the ESCI E/S/C/I definitions and says to respect exclusions.
+    - One call per query covers the top 20 hybrid hits. Each product is numbered and cut to 300 characters, title first. The system prompt spells out the ESCI E/S/C/I definitions and says to respect exclusions.
+    - The answer is the numbers only, comma-separated, with no JSON schema (since 2026-10-25; see "Rerank answer format"). The evaluation tables used the earlier `{"ranking": [...]}` JSON format.
     - Numbers the model leaves out keep hybrid order. Out-of-range or repeated numbers are ignored.
     - Timeout is 60 s with 1 retry. Sequential calls took 20–40 s, so 20 s would have timed out most of them.
     - On timeout, error or an unusable answer, the cross-encoder (max_length 256) orders the same 20 hits, which is exactly `hybrid+cross_encoder_fast`. The query is recorded in `fallback_queries`.

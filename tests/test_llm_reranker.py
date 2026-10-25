@@ -1,12 +1,9 @@
-import json
-
 import pandas as pd
 import pytest
 
 from shopsense.llm.client import BudgetExceeded, LLMError, LLMResponse
 from shopsense.rerank.base import Reranker
 from shopsense.rerank.llm import (
-    RANKING_SCHEMA,
     SYSTEM_PROMPT,
     LLMReranker,
     build_prompt,
@@ -59,32 +56,37 @@ def test_build_prompt_numbers_products_from_one():
 
 
 def test_parse_ranking_converts_to_zero_based():
-    assert parse_ranking('{"ranking": [3, 1, 2]}', 3) == [2, 0, 1]
+    assert parse_ranking("3,1,2", 3) == [2, 0, 1]
+    assert parse_ranking(" 3, 1 ,2\n", 3) == [2, 0, 1]
 
 
 def test_parse_ranking_appends_left_out_products_in_input_order():
-    assert parse_ranking('{"ranking": [3, 3, 9, 0, true]}', 4) == [2, 0, 1, 3]
+    assert parse_ranking("3,3,9,0", 4) == [2, 0, 1, 3]
 
 
-@pytest.mark.parametrize("text", ["nope", "[1, 2]", '{"order": [1]}', '{"ranking": [7, 8]}'])
+@pytest.mark.parametrize(
+    "text",
+    ["nope", "", "[1, 2]", '{"ranking": [1, 2]}', "1, 2, and 3", "Ranking: 1,2", "7,8"],
+)
 def test_parse_ranking_rejects_unusable_answers(text):
     with pytest.raises(ValueError):
         parse_ranking(text, 3)
 
 
 def test_rerank_follows_the_model_and_scores_n_to_1():
-    reranker = make(text=json.dumps({"ranking": [2, 3, 1]}))
+    reranker = make(text="2,3,1")
     expected = [Hit("p2", 3.0), Hit("p3", 2.0), Hit("p1", 1.0)]
     assert reranker.rerank("blue shoes", HITS) == expected
     assert reranker.stats == {"calls": 1, "fallbacks": 0, "cost_usd": pytest.approx(0.002)}
     assert reranker.fallback_queries == []
 
 
-def test_rerank_sends_shortened_texts_with_schema():
-    reranker = make(text='{"ranking": [1, 2, 3]}')
+def test_rerank_sends_shortened_texts_and_asks_for_numbers_only():
+    reranker = make(text="1,2,3")
     reranker.rerank("q", HITS)
     prompt, system, schema = reranker.client.requests[0]
-    assert (system, schema) == (SYSTEM_PROMPT, RANKING_SCHEMA)
+    assert (system, schema) == (SYSTEM_PROMPT, None)
+    assert "comma-separated" in SYSTEM_PROMPT
     assert "[1] red shoes Acme" in prompt
     assert prompt.endswith("[3] coffee mug " + "x" * 29)  # cut to text_chars=40
 
@@ -107,7 +109,7 @@ def test_index_also_indexes_the_fallback():
 
 
 def test_rerank_of_no_hits_makes_no_call():
-    reranker = make(text="{}")
+    reranker = make(text="1")
     assert reranker.rerank("q", []) == []
     assert reranker.client.requests == [] and reranker.stats["calls"] == 0
 
@@ -129,8 +131,9 @@ def test_bad_answer_still_counts_its_cost():
 def test_stats_are_consistent_across_threads():
     from concurrent.futures import ThreadPoolExecutor
 
-    reranker = make(text='{"ranking": [1, 2, 3]}')
+    reranker = make(text="1,2,3")
     with ThreadPoolExecutor(8) as pool:
         list(pool.map(lambda i: reranker.rerank(f"q{i}", HITS), range(200)))
     assert reranker.stats["calls"] == 200
     assert reranker.stats["cost_usd"] == pytest.approx(0.4)
+
