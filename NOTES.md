@@ -266,3 +266,20 @@ Results: `/health` returned ok with 48,862 products. `/search?q=stainless+steel+
 6. **Decide on access.** That's unauthenticated or IAM-only invocations, and whether you need Cloud Armor in front if it's public.
 7. **Create the cloud plumbing** (not done, as you asked): an Artifact Registry repository, Workload Identity Federation for GitHub Actions, and the Cloud Run service.
 8. **Merge or rebase:** none of this has been pushed. The repo has no remote configured.
+
+## Deployed (2026-10-25)
+
+- **URL:** https://shopsense-819934511305.us-central1.run.app (Cloud Run `shopsense`, us-central1, revision `shopsense-00001-mrl`).
+- **Settings:** 2 vCPU, 2 GiB, `--cpu-boost`, min 0 and max 2 instances, 120 s request timeout, unauthenticated.
+- **Build:** `gcloud run deploy --source .` built the image in Cloud Build from the Dockerfile, using the 114 MB upload that `.gcloudignore` allows, and stored it in the Artifact Registry repo `cloud-run-source-deploy`. gcloud created that repo itself. No local Docker was used.
+- **APIs enabled:** run, cloudbuild, artifactregistry.
+- **First attempt failed:** the default build service account (`<project-number>-compute@developer.gserviceaccount.com`) couldn't read the uploaded source (`storage.objects.get` denied). With your approval I granted it `roles/run.builder` and `roles/logging.logWriter`, and the second attempt succeeded.
+- **No Vertex AI settings on the service**, so only the 5 non-LLM pipelines serve. `/pipelines` lists `hybrid+llm` and `intent+hybrid+llm` as unavailable, and calling them returns 503. The reasons are in the README's "Live demo" section.
+- **Checks:**
+  - `/health` returned 200 with 48,862 products.
+  - `/search?q=red+shoes` returned 200 with 10 red shoes. The top results are a Vans sneaker and Ellie Shoes boots.
+  - `/` loads and searches in the browser.
+  - Warm server latency, median of 5 queries: bm25 121 ms, dense 218 ms, hybrid 310 ms, hybrid+cross_encoder 4,374 ms, hybrid+cross_encoder_fast 1,691 ms. The cross-encoder is 3–4× slower than on the laptop.
+- **CI:** GitHub Actions runs pytest on every push and pull request (`.github/workflows/tests.yml`, no GCP access), and it's green.
+- **Image size:** **1.07 GB compressed** in Artifact Registry (`shopsense:latest`), consistent with the ~2 GB uncompressed estimate above.
+- **Still open:** cold starts take a while, because of the image size and the model loading at startup. Set `--min-instances 1` if a reviewer shouldn't wait, but that bills while idle.

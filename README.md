@@ -6,6 +6,35 @@ scored against human relevance labels on quality, latency and cost per query.
 Status: BM25, dense (bge-small), hybrid (RRF), cross-encoder and Gemini (query intent and listwise reranking)
 pipelines, all scored by one harness, and served by a FastAPI app with a one-page search UI.
 
+## Live demo
+
+**https://shopsense-819934511305.us-central1.run.app**: the search page, on Cloud Run (us-central1, 2 vCPU,
+2 GiB, scales to zero, so the first request after idle takes a cold start).
+
+- API: [`/search?q=red+shoes`](https://shopsense-819934511305.us-central1.run.app/search?q=red+shoes),
+  [`/pipelines`](https://shopsense-819934511305.us-central1.run.app/pipelines),
+  [`/health`](https://shopsense-819934511305.us-central1.run.app/health)
+- The 5 non-LLM pipelines serve publicly; the default is `hybrid+cross_encoder_fast`.
+
+| Pipeline (live) | NDCG@10, full catalog* | Recall@50* | Live server latency, median of 5** |
+|---|---|---|---|
+| bm25 | 0.468 | 0.603 | 121 ms |
+| dense | 0.506 | 0.663 | 218 ms |
+| hybrid | 0.520 | 0.687 | 310 ms |
+| hybrid+cross_encoder | 0.574 | 0.687 | 4,374 ms |
+| hybrid+cross_encoder_fast (default) | 0.564 | 0.687 | 1,691 ms |
+
+\* Official ESCI gains, 500 held-out queries, from the offline evaluation in `NOTES.md`.
+\*\* `latency_ms` returned by the live service for 5 queries on a warm instance (2026-10-25), excluding network
+time. Cloud Run's 2 vCPUs run the cross-encoder 3–4× slower than the laptop the evaluation ran on.
+
+**The LLM pipelines are offline-only.** `hybrid+llm` and `intent+hybrid+llm` score best (0.600 and 0.607
+NDCG@10 against 0.565 for the fast cross-encoder on the same 200 queries). But the Gemini reranker took about 50 s per
+call, 24–28% of calls fell back to the cross-encoder (mostly Vertex HTTP 500s), and each costs about $1.1–1.4
+per 1,000 queries. The spend cap is a per-container log, so it doesn't protect a public endpoint. The service
+therefore has no Vertex AI settings: `/pipelines` lists both as unavailable, and calling them returns 503. They
+run locally with `.env` and `scripts/evaluate.py`.
+
 ## Results
 
 500 held-out test queries (US, Task 1 small version, seed 42), official ESCI gains (see below). LLM pipelines
