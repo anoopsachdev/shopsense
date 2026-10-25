@@ -4,7 +4,7 @@ LLM-assisted product search on Amazon's [ESCI shopping-queries dataset](https://
 scored against human relevance labels on quality, latency and cost per query.
 
 Status: BM25, dense (bge-small), hybrid (RRF), cross-encoder and Gemini (query intent and listwise reranking)
-pipelines, all scored by one harness, and served by a FastAPI app.
+pipelines, all scored by one harness, and served by a FastAPI app with a one-page search UI.
 
 ## Results
 
@@ -83,7 +83,7 @@ PYTHONPATH=src python scripts/build_index.py --catalog-only   # data/catalog.par
 PYTHONPATH=src uvicorn shopsense.api:app --port 8080
 ```
 
-Then call the API:
+Open http://localhost:8080 for the search page, or call the API directly:
 
 - `GET /search?q=red+shoes&pipeline=hybrid+cross_encoder_fast&k=10`: results, the parsed intent (for
   `intent+hybrid+llm`), latency and whether the LLM reranker fell back to the cross-encoder.

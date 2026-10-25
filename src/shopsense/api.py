@@ -3,6 +3,7 @@
     GET /search?q=red+shoes&pipeline=hybrid+cross_encoder_fast&k=10
     GET /pipelines
     GET /health
+    GET /            the search page (web/index.html)
 
 At startup it loads data/catalog.parquet and the saved dense vectors, builds every
 pipeline with shared stages (one BM25 index, one cross-encoder, ...), and runs one
@@ -17,6 +18,7 @@ LLM pipelines need .env or the same environment variables (see .env.example) and
 Application Default Credentials. Without them they are listed as unavailable. They
 are rate-limited per client IP. Settings:
     SHOPSENSE_LLM_RATE_PER_MIN    LLM searches per IP per minute (default: 10)
+    SHOPSENSE_WEB_DIR             folder holding index.html (default: the repo's web/)
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from typing import Any
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from shopsense import data
@@ -46,6 +49,8 @@ logger = logging.getLogger("shopsense.api")
 DEFAULT_PIPELINE = "hybrid+cross_encoder_fast"
 MAX_K = 50
 LLM_ENV_KEYS = ("GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "GEMINI_RERANK_MODEL")
+REPO_WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+WEB_DIR = Path(os.environ.get("SHOPSENSE_WEB_DIR", REPO_WEB_DIR))
 
 
 class Product(BaseModel):
@@ -290,6 +295,10 @@ def create_app(load: Callable[[], AppState] = load_state) -> FastAPI:
             intent=_intent_model(details.intent),
             results=results,
         )
+
+    @app.get("/", include_in_schema=False)
+    def index() -> FileResponse:
+        return FileResponse(WEB_DIR / "index.html")
 
     return app
 

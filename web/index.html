@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ShopSense</title>
+  <style>
+    :root {
+      --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
+      --border: #deded8; --accent: #2f5f8a; --warn-bg: #fff4d6; --warn: #7a5a00;
+      --err-bg: #fde8e8; --err: #8a1f1f; --chip: #eef2f6;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #161615; --panel: #1f1f1e; --text: #ececea; --muted: #a3a39e;
+        --border: #34342f; --accent: #8ab6dd; --warn-bg: #3a2f10; --warn: #f0cf7a;
+        --err-bg: #3d1a1a; --err: #f3a6a6; --chip: #2a3139;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 1.4rem; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 20px; font-size: 0.95rem; }
+    form { display: flex; flex-wrap: wrap; gap: 8px; }
+    input[type=search] { flex: 1 1 260px; min-width: 0; }
+    input, select, button {
+      font: inherit; padding: 8px 10px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    }
+    button { background: var(--accent); color: var(--panel); border-color: var(--accent); cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    .meta { margin: 16px 0 8px; color: var(--muted); font-size: 0.9rem; display: flex; flex-wrap: wrap; gap: 12px; }
+    .badge { padding: 1px 8px; border-radius: 999px; background: var(--warn-bg); color: var(--warn); }
+    .error { margin-top: 16px; padding: 10px 12px; border-radius: 6px; background: var(--err-bg); color: var(--err); }
+    .intent { margin: 8px 0 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); font-size: 0.9rem; }
+    .intent dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0 0; }
+    .intent dt { color: var(--muted); }
+    .intent dd { margin: 0; }
+    .chip { display: inline-block; padding: 0 8px; margin: 0 4px 2px 0; border-radius: 999px; background: var(--chip); }
+    ol { list-style: none; padding: 0; margin: 0; }
+    li { display: grid; grid-template-columns: 2.5em 1fr auto; gap: 8px; padding: 10px 0; border-top: 1px solid var(--border); }
+    .rank { color: var(--muted); text-align: right; }
+    .title { overflow-wrap: anywhere; }
+    .details { color: var(--muted); font-size: 0.85rem; }
+    .score { color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>ShopSense</h1>
+  <p class="sub">Product search over 48,862 Amazon ESCI products.</p>
+
+  <form id="search-form">
+    <input id="q" type="search" name="q" placeholder="e.g. waterproof hiking boots without laces" required maxlength="200" autofocus>
+    <select id="pipeline" name="pipeline" aria-label="Pipeline"></select>
+    <button id="go" type="submit">Search</button>
+  </form>
+
+  <div id="error" class="error" hidden></div>
+  <div id="meta" class="meta" hidden></div>
+  <section id="intent" class="intent" hidden aria-label="Parsed intent"></section>
+  <ol id="results"></ol>
+</main>
+
+<script>
+  const DEFAULT_PIPELINE = "hybrid+cross_encoder_fast";
+  const $ = (id) => document.getElementById(id);
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function showError(message) {
+    $("error").textContent = message;
+    $("error").hidden = false;
+  }
+
+  async function loadPipelines() {
+    const select = $("pipeline");
+    try {
+      const response = await fetch("/pipelines");
+      const pipelines = await response.json();
+      for (const p of pipelines) {
+        const option = el("option", "", p.name + (p.uses_llm ? " (LLM)" : ""));
+        option.value = p.name;
+        option.disabled = !p.available;
+        if (!p.available && p.reason) option.title = p.reason;
+        select.append(option);
+      }
+    } catch (err) {
+      const option = el("option", "", DEFAULT_PIPELINE);
+      option.value = DEFAULT_PIPELINE;
+      select.append(option);
+      showError("Could not load the pipeline list: " + err.message);
+    }
+    select.value = new URLSearchParams(location.search).get("pipeline") || DEFAULT_PIPELINE;
+  }
+
+  function renderIntent(intent) {
+    const box = $("intent");
+    box.replaceChildren();
+    if (!intent) { box.hidden = true; return; }
+    box.append(el("strong", "", "Parsed intent"));
+    const dl = el("dl");
+    const rows = [
+      ["product type", intent.product_type],
+      ["brand", intent.brand],
+      ["color", intent.color],
+      ["attributes", intent.attributes],
+      ["exclusions", intent.exclusions],
+    ];
+    for (const [label, value] of rows) {
+      dl.append(el("dt", "", label));
+      const dd = el("dd");
+      if (Array.isArray(value)) {
+        if (value.length === 0) dd.textContent = "–";
+        for (const item of value) dd.append(el("span", "chip", item));
+      } else {
+        dd.textContent = value || "–";
+      }
+      dl.append(dd);
+    }
+    box.append(dl);
+    box.hidden = false;
+  }
+
+  function renderResults(body) {
+    const meta = $("meta");
+    meta.replaceChildren(
+      el("span", "", `${body.results.length} results`),
+      el("span", "", `${body.pipeline}`),
+      el("span", "", `${body.latency_ms.toFixed(0)} ms`),
+    );
+    if (body.fell_back) {
+      const badge = el("span", "badge", "LLM fell back to the cross-encoder");
+      meta.append(badge);
+    }
+    meta.hidden = false;
+    renderIntent(body.intent);
+
+    const list = $("results");
+    list.replaceChildren();
+    for (const r of body.results) {
+      const item = el("li");
+      item.append(el("span", "rank", r.rank + "."));
+      const main = el("div");
+      main.append(el("div", "title", r.title || r.product_id));
+      const details = [r.brand, r.color, r.product_id].filter(Boolean).join(" · ");
+      main.append(el("div", "details", details));
+      item.append(main);
+      item.append(el("span", "score", r.score.toFixed(3)));
+      list.append(item);
+    }
+  }
+
+  async function search(event) {
+    event.preventDefault();
+    const q = $("q").value.trim();
+    if (!q) return;
+    const pipeline = $("pipeline").value;
+    const params = new URLSearchParams({ q, pipeline, k: "10" });
+    history.replaceState(null, "", "?" + params);
+    $("error").hidden = true;
+    $("go").disabled = true;
+    $("go").textContent = "Searching…";
+    try {
+      const response = await fetch("/search?" + params);
+      const body = await response.json();
+      if (!response.ok) {
+        const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+        showError(`${response.status}: ${detail}`);
+        return;
+      }
+      renderResults(body);
+    } catch (err) {
+      showError("Search failed: " + err.message);
+    } finally {
+      $("go").disabled = false;
+      $("go").textContent = "Search";
+    }
+  }
+
+  $("search-form").addEventListener("submit", search);
+  loadPipelines().then(() => {
+    const q = new URLSearchParams(location.search).get("q");
+    if (q) { $("q").value = q; $("search-form").requestSubmit(); }
+  });
+</script>
+</body>
+</html>

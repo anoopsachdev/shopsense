@@ -174,6 +174,15 @@ def test_llm_pipelines_are_rate_limited_per_ip(client):
     assert all(client.get("/search", params={"q": "x"}).status_code == 200 for _ in range(5))
 
 
+def test_root_serves_the_search_page(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    page = response.text
+    assert 'id="pipeline"' in page and "/search?" in page and "/pipelines" in page
+    assert f'const DEFAULT_PIPELINE = "{api.DEFAULT_PIPELINE}"' in page
+
+
 def test_rate_limiter_sliding_window():
     now = [0.0]
     limiter = api.RateLimiter(limit=2, window_s=60, clock=lambda: now[0])
