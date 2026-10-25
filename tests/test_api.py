@@ -266,6 +266,7 @@ def test_root_serves_the_search_page(client):
     page = response.text
     assert 'id="pipeline"' in page and "/search?" in page and "/pipelines" in page
     assert f'const DEFAULT_PIPELINE = "{api.DEFAULT_PIPELINE}"' in page
+    assert 'href="https://github.com/anoopsachdev/shopsense"' in page
 
 
 def test_rate_limiter_sliding_window():

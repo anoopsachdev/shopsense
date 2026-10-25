@@ -25,6 +25,7 @@
     main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
     h1 { font-size: 1.4rem; margin: 0 0 4px; }
     .sub { color: var(--muted); margin: 0 0 20px; font-size: 0.95rem; }
+    .sub a { color: var(--accent); }
     form { display: flex; flex-wrap: wrap; gap: 8px; }
     input[type=search] { flex: 1 1 260px; min-width: 0; }
     input, select, button {
@@ -54,7 +55,10 @@
 <body>
 <main>
   <h1>ShopSense</h1>
-  <p class="sub">Product search over 48,862 Amazon ESCI products.</p>
+  <p class="sub">
+    Product search over 48,862 Amazon ESCI products ·
+    <a href="https://github.com/anoopsachdev/shopsense" target="_blank" rel="noopener">Source code on GitHub</a>
+  </p>
 
   <form id="search-form">
     <input id="q" type="search" name="q" placeholder="e.g. waterproof hiking boots without laces" required maxlength="200" autofocus>
