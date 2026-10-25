@@ -94,6 +94,16 @@ Indexes and models load once at startup (about 1 GB of RAM); the catalog is neve
 need the `.env` settings and Application Default Credentials, and are rate-limited per IP
 (`SHOPSENSE_LLM_RATE_PER_MIN`, default 10).
 
+## Docker
+
+```bash
+docker build -t shopsense .
+docker run --rm -p 8080:8080 shopsense
+```
+
+The image holds the catalog, the dense vectors and both models, and runs uvicorn on `$PORT`. It never contains `.env`; pass
+the LLM settings as environment variables if you want the LLM pipelines.
+
 ## Commands
 
 - Tests: `pytest -q`

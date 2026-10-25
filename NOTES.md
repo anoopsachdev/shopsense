@@ -215,8 +215,8 @@ Neither model returned "not found", so `GOOGLE_CLOUD_LOCATION` stays `global`.
 36. **LLM availability:** LLM pipelines are listed as unavailable, with the reason, when `.env` or the environment lacks the Vertex settings, or when building their clients fails. The other pipelines still serve.
 37. **Rate limit:** an in-memory sliding window allows `SHOPSENSE_LLM_RATE_PER_MIN` (default 10) LLM searches per minute per client IP. The IP is the first `X-Forwarded-For` entry, which Cloud Run sets, otherwise the socket peer. Over the limit it returns 429 with `Retry-After: 60`. The window is per process, so two Cloud Run instances each allow 10. `X-Forwarded-For` can be spoofed, so this is a guard against accidents, not a security boundary. Non-LLM pipelines aren't limited.
 38. **Per-request intent and fallback** come from `Pipeline.search_details`, which returns `SearchDetails(hits, intent, fell_back)`, and `LLMReranker.rerank_with_status`. No shared "last call" state, so concurrent requests can't mix them up.
-40. **Web page:** `web/index.html` is plain HTML, CSS and JS with no build step, served at `/` (`SHOPSENSE_WEB_DIR` can move it). It has a search box and a pipeline dropdown that defaults to `hybrid+cross_encoder_fast`; unavailable pipelines are disabled, with the reason as a tooltip. It shows the results, latency, a badge when the LLM fell back, and the parsed intent as a small table. The query and pipeline live in the URL, so a search can be shared. All text goes in through `textContent`, never as HTML. It supports light and dark mode and has no horizontal scroll at 375 px; I checked both in the in-app browser.
 39. **Run locally:** `PYTHONPATH=src uvicorn shopsense.api:app --port 8080`, with all 7 pipelines available. The resident set was **~950 MB right after startup** and settled around 640 MB after a few searches. The default pipeline answered in about 1.1 s, BM25 in 58 ms, and `intent+hybrid+llm` in 8.4 s. Missing or bad parameters returned 422, and an unknown pipeline 400.
+40. **Web page:** `web/index.html` is plain HTML, CSS and JS with no build step, served at `/` (`SHOPSENSE_WEB_DIR` can move it). It has a search box and a pipeline dropdown that defaults to `hybrid+cross_encoder_fast`; unavailable pipelines are disabled, with the reason as a tooltip. It shows the results, latency, a badge when the LLM fell back, and the parsed intent as a small table. The query and pipeline live in the URL, so a search can be shared. All text goes in through `textContent`, never as HTML. It supports light and dark mode and has no horizontal scroll at 375 px; I checked both in the in-app browser.
 
 ## What failed or needs your attention
 
@@ -231,3 +231,38 @@ Neither model returned "not found", so `GOOGLE_CLOUD_LOCATION` stays `global`.
 - **Dependencies:** sentence-transformers 6 needs torch ≥ 2.6, but Anaconda has 2.3.1, and its torchvision and torchaudio clashed with a newer torch. So `.venv` was rebuilt as an isolated venv: torch 2.14.1, numpy 2.5.4, pyarrow 26, fastembed 0.9, sentence-transformers 6.2. That uses about 1.4 GB.
 - **The rerank model is slow:** 20–40 s per 20-product call when sequential, and about 54 s with 8 in flight (the 8-query smoke test). The answer is only about 60 tokens, so most of the time is queueing or decoding on the server, not output length. That's why the timeout is 60 s and the evaluation runs queries concurrently.
 - **The network is slow and flaky here.** The first full re-download, which streamed range requests, timed out after 100 minutes at 1.22M of 1.81M rows. The resumable version finished in about 2 hours with 4 read timeouts, all recovered.
+
+## Ready for deploy
+
+Nothing is deployed, pushed or created in the cloud. Here's where the container stands.
+
+**Not built yet: Docker isn't installed on this Mac** (`docker: command not found`). Installing Docker Desktop or colima needs admin rights, and the disk has about 9 GB free, so I didn't. The `Dockerfile` and `.dockerignore` are committed but **unbuilt**. As the closest check, I ran the image's runtime setup natively:
+- a folder holding only what the image copies in (`data/catalog.parquet`, the vectors, `web/`), with no `.env`;
+- `HF_HUB_OFFLINE=1` and the baked-model cache path;
+- the Dockerfile's own command, `sh -c 'exec uvicorn shopsense.api:app --host 0.0.0.0 --port ${PORT}'`, with `PORT=8090`.
+
+Results: `/health` returned ok with 48,862 products. `/search?q=stainless+steel+water+bottle` returned water bottles in 432 ms. Both LLM pipelines were reported unavailable with "LLM settings missing", and `/` served the page.
+
+| | Value | How it was measured |
+|---|---|---|
+| Image size | **about 2 GB uncompressed (estimate, not measured)** | Python packages are 1.49 GB in the macOS venv (torch 583 MB, pyarrow 127 MB, transformers 114 MB, scipy 99 MB, pandas 80 MB, onnxruntime 80 MB). The Linux CPU torch wheel is somewhat larger. Add `python:3.12-slim` (~130 MB), the baked models (~155 MB: bge-small ONNX 65 MB, MiniLM cross-encoder ~90 MB) and the data (catalog 36 MB, vectors 74 MB). |
+| Memory at startup | **~950 MB resident** | 941 MB without LLM pipelines (container-style run) and 952 MB with all 7 (local run), after indexing and warm-up. It settled around 640 MB after a few searches. |
+| Startup work | BM25 index 6–10 s, plus loading two models and the warm-up searches | Fits a startup probe on `/health` with a 120 s or longer budget. |
+
+**What you need to do before deploying:**
+1. **Build and run the image once yourself.** Install Docker Desktop or colima, then run:
+   ```bash
+   docker build --platform linux/amd64 -t shopsense .
+   docker run --rm -p 8080:8080 shopsense
+   ```
+   Then curl `/health` and `/search?q=red+shoes`, and check `docker images` for the real size. Use `--platform linux/amd64` on Apple Silicon, since Cloud Run runs amd64. The build needs 3–4 GB of free disk.
+2. **Size Cloud Run at 2 GiB of memory and 2 vCPU.** 1 GiB is too tight for ~950 MB resident plus request spikes. The cross-encoder is CPU-bound, so one vCPU roughly doubles its 0.6–1.2 s latency. Consider `--cpu-boost` and min-instances 1 to avoid slow cold starts, which cost money while idle.
+3. **Ship the data separately.** `data/catalog.parquet` and `data/dense_bge-small-en-v1.5.npz` are gitignored, so a CI build (GitHub Actions) won't have them. Upload both to the Cloud Storage bucket from CLAUDE.md and have the workflow download them before `docker build`. Rebuild them with `build_index.py` only if the sample changes. `--catalog-only` writes the catalog without re-embedding.
+4. **For LLM pipelines on Cloud Run:**
+   - Set the `.env` keys as service environment variables: `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, both `GEMINI_*_MODEL` and the four `*_PRICE_*`. The image never contains `.env`.
+   - Give the service account `roles/aiplatform.user`. ADC then works with no key.
+   - Without these, the API serves the 5 non-LLM pipelines and lists the other 2 as unavailable.
+5. **The $3 cap doesn't carry over to Cloud Run.** It's the call log in `data/llm_cache.sqlite` inside the container, so each instance starts at $0 and the log is lost on restart. The per-IP rate limit is also per instance. Before exposing LLM pipelines publicly, set a **Cloud Billing budget with alerts**, or a Vertex AI quota. Better still, keep LLM pipelines off the public service. They took ~50 s per call with frequent HTTP 500s in the evaluation, which is too slow for interactive use anyway.
+6. **Decide on access.** That's unauthenticated or IAM-only invocations, and whether you need Cloud Armor in front if it's public.
+7. **Create the cloud plumbing** (not done, as you asked): an Artifact Registry repository, Workload Identity Federation for GitHub Actions, and the Cloud Run service.
+8. **Merge or rebase:** none of this has been pushed. The repo has no remote configured.

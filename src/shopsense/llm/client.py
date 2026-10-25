@@ -32,6 +32,18 @@ DEFAULT_TIMEOUT_S = 20.0
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_BUDGET_USD = 3.0
 
+# Settings read from the environment even when there is no .env file (e.g. Cloud Run).
+SETTINGS_KEYS = (
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "GEMINI_INTENT_MODEL",
+    "GEMINI_RERANK_MODEL",
+    "INTENT_PRICE_INPUT_PER_M",
+    "INTENT_PRICE_OUTPUT_PER_M",
+    "RERANK_PRICE_INPUT_PER_M",
+    "RERANK_PRICE_OUTPUT_PER_M",
+)
+
 
 class LLMError(RuntimeError):
     """A call failed after all retries (timeout, server error or bad response)."""
@@ -90,7 +102,11 @@ Backend = Callable[[str, str, str | None, Mapping[str, Any] | None, float], Back
 
 
 def load_env(path: Path = Path(".env")) -> dict[str, str]:
-    """KEY=VALUE pairs from a .env file (if present), overridden by the environment."""
+    """KEY=VALUE pairs from a .env file (if present), overridden by the environment.
+
+    Environment variables win for any key in the file and for every SETTINGS_KEYS key,
+    so a deployment can configure everything without a .env file.
+    """
     values: dict[str, str] = {}
     if path.exists():
         for line in path.read_text().splitlines():
@@ -98,7 +114,8 @@ def load_env(path: Path = Path(".env")) -> dict[str, str]:
             if line and not line.startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
                 values[key.strip()] = value.strip()
-    values.update({key: os.environ[key] for key in values if key in os.environ})
+    keys = set(values) | set(SETTINGS_KEYS)
+    values.update({key: os.environ[key] for key in keys if key in os.environ})
     return values
 
 

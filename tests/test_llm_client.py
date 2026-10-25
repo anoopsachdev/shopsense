@@ -52,6 +52,11 @@ def test_load_env_reads_file_and_environment_overrides(tmp_path, monkeypatch):
     assert load_env(tmp_path / "missing") == {}
 
 
+def test_load_env_reads_settings_from_environment_without_a_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "from-env")
+    monkeypatch.setenv("UNRELATED", "ignored")
+    assert load_env(tmp_path / "missing") == {"GOOGLE_CLOUD_PROJECT": "from-env"}
+
 
 def test_model_config_from_env():
     env = {
