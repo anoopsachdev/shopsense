@@ -1,0 +1,22 @@
+# What `gcloud run deploy --source .` uploads to Cloud Build.
+# Without this file gcloud would use .gitignore, which drops all of data/.
+# Uploaded: code, web/, Dockerfile (+ .dockerignore, pyproject.toml, README.md) and the two
+# data files the image needs. Everything else in data/ stays local.
+
+.git/
+.gitignore
+.github/
+.venv/
+.claude/
+.env
+.env.*
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+data/*
+!data/catalog.parquet
+!data/dense_bge-small-en-v1.5.npz
+# Excluded by data/* above; listed so it's explicit:
+#   data/raw/  data/products.parquet  data/examples.parquet  data/llm_cache.sqlite
+#   data/eval_query_ids.json
