@@ -1,0 +1,35 @@
+# Unit tests on every push and pull request. No GCP access, no secrets, no data:
+# every test uses fakes or temporary files, so nothing needs the ESCI data, the
+# dense vectors, model downloads or Vertex AI.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HF_HUB_OFFLINE: "1"  # fail loudly if a test ever tries to download a model
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install CPU-only torch, then the package
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.6"
+          pip install -e ".[dev]"
+
+      - name: pytest
+        run: pytest -q
