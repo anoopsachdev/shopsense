@@ -9,7 +9,11 @@ pipelines, all scored by one harness, and served by a FastAPI app with a one-pag
 ## Live demo
 
 **https://shopsense-819934511305.us-central1.run.app**: the search page, on Cloud Run (us-central1, 2 vCPU,
-2 GiB, scales to zero, so the first request after idle takes a cold start).
+2 GiB, scales to zero).
+
+The page loads in about a second even on a cold instance. The models load in the background, and only the first
+search after a cold start waits, up to about 1.5 minutes, with a "warming up" note. A Cloud Scheduler job calls
+`/health?wait=true` every 10 minutes, so an instance is usually already warm.
 
 - API: [`/search?q=red+shoes`](https://shopsense-819934511305.us-central1.run.app/search?q=red+shoes),
   [`/pipelines`](https://shopsense-819934511305.us-central1.run.app/pipelines),
